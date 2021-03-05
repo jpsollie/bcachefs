@@ -757,7 +757,6 @@ static int bch2_btree_iter_verify_ret(struct btree_iter *iter, struct bkey_s_c k
 					  k.k->p.snapshot));
 
 	bch2_trans_iter_init(trans, &copy, iter->btree_id, iter->pos,
-			     BTREE_ITER_NOPRESERVE|
 			     BTREE_ITER_ALL_SNAPSHOTS);
 	prev = bch2_btree_iter_prev(&copy);
 	if (!prev.k)
@@ -784,43 +783,6 @@ static int bch2_btree_iter_verify_ret(struct btree_iter *iter, struct bkey_s_c k
 out:
 	bch2_trans_iter_exit(trans, &copy);
 	return ret;
-}
-
-void bch2_assert_pos_locked(struct btree_trans *trans, enum btree_id id,
-			    struct bpos pos, bool key_cache)
-{
-	struct btree_path *path;
-	unsigned idx;
-	char buf[100];
-
-	trans_for_each_path_inorder(trans, path, idx) {
-		int cmp = cmp_int(path->btree_id, id) ?:
-			cmp_int(path->cached, key_cache);
-
-		if (cmp > 0)
-			break;
-		if (cmp < 0)
-			continue;
-
-		if (!(path->nodes_locked & 1) ||
-		    !path->should_be_locked)
-			continue;
-
-		if (!key_cache) {
-			if (bkey_cmp(pos, path->l[0].b->data->min_key) >= 0 &&
-			    bkey_cmp(pos, path->l[0].b->key.k.p) <= 0)
-				return;
-		} else {
-			if (!bkey_cmp(pos, path->pos))
-				return;
-		}
-	}
-
-	bch2_dump_trans_paths_updates(trans);
-	panic("not locked: %s %s%s\n",
-	      bch2_btree_ids[id],
-	      (bch2_bpos_to_text(&PBUF(buf), pos), buf),
-	      key_cache ? " cached" : "");
 }
 
 #else
@@ -2285,21 +2247,26 @@ static struct bkey_s_c __bch2_btree_iter_peek(struct btree_iter *iter, struct bp
 			k = bkey_i_to_s_c(next_update);
 		}
 
-		if (k.k && bkey_deleted(k.k)) {
-			/*
-			 * If we've got a whiteout, and it's after the search
-			 * key, advance the search key to the whiteout instead
-			 * of just after the whiteout - it might be a btree
-			 * whiteout, with a real key at the same position, since
-			 * in the btree deleted keys sort before non deleted.
-			 */
-			search_key = bpos_cmp(search_key, k.k->p)
-				? k.k->p
-				: bpos_successor(k.k->p);
-			continue;
-		}
-
 		if (likely(k.k)) {
+			/*
+			 * We can never have a key in a leaf node at POS_MAX, so
+			 * we don't have to check these successor() calls:
+			 */
+			if ((iter->flags & BTREE_ITER_FILTER_SNAPSHOTS) &&
+			    !bch2_snapshot_is_ancestor(trans->c,
+						       iter->snapshot,
+						       k.k->p.snapshot)) {
+				search_key = bpos_successor(k.k->p);
+				continue;
+			}
+
+			if (bkey_whiteout(k.k) &&
+			    !(iter->flags & BTREE_ITER_ALL_SNAPSHOTS)) {
+				search_key = bkey_successor(iter, k.k->p);
+				continue;
+			}
+
+>>>>>>> 6b73db8c501e (bcachefs: BTREE_ITER_FILTER_SNAPSHOTS)
 			break;
 		} else if (likely(bpos_cmp(iter->path->l[0].b->key.k.p, SPOS_MAX))) {
 			/* Advance to next leaf node: */
@@ -2407,10 +2374,16 @@ struct bkey_s_c bch2_btree_iter_peek(struct btree_iter *iter)
 	else if (bkey_cmp(bkey_start_pos(k.k), iter->pos) > 0)
 		iter->pos = bkey_start_pos(k.k);
 
-	iter->path = btree_path_set_pos(trans, iter->path, k.k->p,
-				iter->flags & BTREE_ITER_INTENT,
-				btree_iter_ip_allocated(iter));
-	BUG_ON(!iter->path->nodes_locked);
+	if (iter->flags & BTREE_ITER_FILTER_SNAPSHOTS)
+		iter->pos.snapshot = iter->snapshot;
+
+	cmp = bpos_cmp(k.k->p, iter->path->pos);
+	if (cmp) {
+		iter->path = bch2_btree_path_make_mut(trans, iter->path,
+					iter->flags & BTREE_ITER_INTENT);
+		iter->path->pos = k.k->p;
+		btree_path_check_sort(trans, iter->path, cmp);
+	}
 out:
 	if (iter->update_path) {
 		BUG_ON(!(iter->update_path->nodes_locked & 1));
@@ -2428,6 +2401,10 @@ out:
 	}
 
 	bch2_btree_iter_verify_entry_exit(iter);
+	bch2_btree_iter_verify(iter);
+	ret = bch2_btree_iter_verify_ret(iter, k);
+	if (unlikely(ret))
+		return bkey_s_c_err(ret);
 
 	return k;
 }
@@ -2841,6 +2818,13 @@ static void __bch2_trans_iter_init(struct btree_trans *trans,
 	if (!(flags & __BTREE_ITER_ALL_SNAPSHOTS) &&
 	    !btree_type_has_snapshots(btree_id))
 		flags &= ~BTREE_ITER_ALL_SNAPSHOTS;
+#if 0
+	/* let's have this be explicitly set: */
+	if ((flags & BTREE_ITER_TYPE) != BTREE_ITER_NODES &&
+	    btree_type_has_snapshots(btree_id) &&
+	    !(flags & BTREE_ITER_ALL_SNAPSHOTS))
+		flags |= BTREE_ITER_FILTER_SNAPSHOTS;
+#endif
 
 	if (!(flags & BTREE_ITER_ALL_SNAPSHOTS) &&
 	    btree_type_has_snapshots(btree_id))
