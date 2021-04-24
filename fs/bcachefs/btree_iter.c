@@ -3030,7 +3030,16 @@ void *bch2_trans_kmalloc(struct btree_trans *trans, size_t size)
 	if (new_top > trans->mem_bytes) {
 		size_t old_bytes = trans->mem_bytes;
 		size_t new_bytes = roundup_pow_of_two(new_top);
-		void *new_mem = krealloc(trans->mem, new_bytes, GFP_NOFS);
+		void *new_mem;
+
+		WARN_ON_ONCE(new_bytes > BTREE_TRANS_MEM_MAX);
+
+		new_mem = krealloc(trans->mem, new_bytes, GFP_NOFS);
+		if (!new_mem && new_bytes <= BTREE_TRANS_MEM_MAX) {
+			new_mem = mempool_alloc(&trans->c->btree_trans_mem_pool, GFP_KERNEL);
+			new_bytes = BTREE_TRANS_MEM_MAX;
+			kfree(trans->mem);
+		}
 
 		if (!new_mem)
 			return ERR_PTR(-ENOMEM);
@@ -3196,17 +3205,10 @@ void bch2_trans_exit(struct btree_trans *trans)
 
 	bch2_journal_preres_put(&c->journal, &trans->journal_preres);
 
-	if (trans->fs_usage_deltas) {
-		if (trans->fs_usage_deltas->size + sizeof(trans->fs_usage_deltas) ==
-		    REPLICAS_DELTA_LIST_MAX)
-			mempool_free(trans->fs_usage_deltas,
-				     &c->replicas_delta_pool);
-		else
-			kfree(trans->fs_usage_deltas);
-	}
+	kfree(trans->fs_usage_deltas);
 
 	if (trans->mem_bytes == BTREE_TRANS_MEM_MAX)
-		mempool_free(trans->mem, &c->btree_trans_mem_pool);
+		mempool_free(trans->mem, &trans->c->btree_trans_mem_pool);
 	else
 		kfree(trans->mem);
 
@@ -3217,8 +3219,8 @@ void bch2_trans_exit(struct btree_trans *trans)
 	trans->paths = this_cpu_xchg(c->btree_paths_bufs->path, trans->paths);
 #endif
 
-	if (trans->paths)
-		mempool_free(trans->paths, &c->btree_paths_pool);
+	if (trans->iters)
+		mempool_free(trans->iters, &trans->c->btree_iters_pool);
 
 	trans->mem	= (void *) 0x1;
 	trans->paths	= (void *) 0x1;
@@ -3303,10 +3305,9 @@ void bch2_btree_trans_to_text(struct printbuf *out, struct bch_fs *c)
 
 void bch2_fs_btree_iter_exit(struct bch_fs *c)
 {
-	if (c->btree_trans_barrier_initialized)
-		cleanup_srcu_struct(&c->btree_trans_barrier);
 	mempool_exit(&c->btree_trans_mem_pool);
-	mempool_exit(&c->btree_paths_pool);
+	mempool_exit(&c->btree_iters_pool);
+	cleanup_srcu_struct(&c->btree_trans_barrier);
 }
 
 int bch2_fs_btree_iter_init(struct bch_fs *c)
@@ -3317,13 +3318,11 @@ int bch2_fs_btree_iter_init(struct bch_fs *c)
 	INIT_LIST_HEAD(&c->btree_trans_list);
 	mutex_init(&c->btree_trans_lock);
 
-	ret   = mempool_init_kmalloc_pool(&c->btree_paths_pool, 1,
-			sizeof(struct btree_path) * nr +
+	return  init_srcu_struct(&c->btree_trans_barrier) ?:
+		mempool_init_kmalloc_pool(&c->btree_iters_pool, 1,
+			sizeof(struct btree_iter) * nr +
+			sizeof(struct btree_insert_entry) * nr +
 			sizeof(struct btree_insert_entry) * nr) ?:
 		mempool_init_kmalloc_pool(&c->btree_trans_mem_pool, 1,
-					  BTREE_TRANS_MEM_MAX) ?:
-		init_srcu_struct(&c->btree_trans_barrier);
-	if (!ret)
-		c->btree_trans_barrier_initialized = true;
-	return ret;
+					  BTREE_TRANS_MEM_MAX);
 }
