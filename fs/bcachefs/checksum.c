@@ -6,6 +6,9 @@
 
 #include <linux/crc32c.h>
 #include <linux/crypto.h>
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+#include <linux/xxhash.h>
+#endif
 #include <linux/key.h>
 #include <linux/random.h>
 #include <linux/scatterlist.h>
@@ -26,6 +29,9 @@
 struct bch2_checksum_state {
 	union {
 		u64 seed;
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+		struct xxh64_state h64state;
+#endif
 	};
 	unsigned type;
 };
@@ -44,6 +50,11 @@ static void bch2_checksum_init(struct bch2_checksum_state* state)
 	case BCH_CSUM_CRC64_NONZERO:
 		state->seed = U64_MAX;
 		break;
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+	case BCH_CSUM_XXHASH:
+		xxh64_reset(&state->h64state, 0);
+		break;
+#endif
 	default:
 		BUG();
 	}
@@ -56,6 +67,10 @@ static u64 bch2_checksum_final(struct bch2_checksum_state* state)
 	case BCH_CSUM_CRC32C:
 	case BCH_CSUM_CRC64:
 		return state->seed;
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+	case BCH_CSUM_XXHASH:
+		return xxh64_digest(&state->h64state);
+#endif
 	case BCH_CSUM_CRC32C_NONZERO:
 		return state->seed ^ U32_MAX;
 	case BCH_CSUM_CRC64_NONZERO:
@@ -78,6 +93,11 @@ static void bch2_checksum_update(struct bch2_checksum_state* state, const void *
 	case BCH_CSUM_CRC64:
 		state->seed = crc64_be(state->seed, data, len);
 		break;
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+	case BCH_CSUM_XXHASH:
+		xxh64_update(&state->h64state, data, len);
+		break;
+#endif
 	default:
 		BUG();
 	}
@@ -155,6 +175,9 @@ struct bch_csum bch2_checksum(struct bch_fs *c, unsigned type,
 	case BCH_CSUM_CRC32C_NONZERO:
 	case BCH_CSUM_CRC64_NONZERO:
 	case BCH_CSUM_CRC32C:
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+	case BCH_CSUM_XXHASH:
+#endif
 	case BCH_CSUM_CRC64: {
 		struct bch2_checksum_state state;
 		state.type = type;
@@ -205,6 +228,9 @@ static struct bch_csum __bch2_checksum_bio(struct bch_fs *c, unsigned type,
 	case BCH_CSUM_CRC32C_NONZERO:
 	case BCH_CSUM_CRC64_NONZERO:
 	case BCH_CSUM_CRC32C:
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+	case BCH_CSUM_XXHASH:
+#endif
 	case BCH_CSUM_CRC64: {
 		struct bch2_checksum_state state;
 		state.type = type;

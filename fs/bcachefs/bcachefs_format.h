@@ -1456,7 +1456,12 @@ enum bch_csum_type {
 	BCH_CSUM_CHACHA20_POLY1305_128	= 4,
 	BCH_CSUM_CRC32C			= 5,
 	BCH_CSUM_CRC64			= 6,
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+	BCH_CSUM_XXHASH			= 7,
+	BCH_CSUM_NR			= 8,
+#else
 	BCH_CSUM_NR			= 7,
+#endif
 };
 
 static const unsigned bch_crc_bytes[] = {
@@ -1465,6 +1470,9 @@ static const unsigned bch_crc_bytes[] = {
 	[BCH_CSUM_CRC32C]			= 4,
 	[BCH_CSUM_CRC64_NONZERO]		= 8,
 	[BCH_CSUM_CRC64]			= 8,
+#ifdef CONFIG_BCACHEFS_ADDITIONAL_HASHES
+	[BCH_CSUM_XXHASH]			= 8,
+#endif
 	[BCH_CSUM_CHACHA20_POLY1305_80]		= 10,
 	[BCH_CSUM_CHACHA20_POLY1305_128]	= 16,
 };
@@ -1483,7 +1491,8 @@ static inline _Bool bch2_csum_type_is_encryption(enum bch_csum_type type)
 #define BCH_CSUM_OPTS()			\
 	x(none,			0)	\
 	x(crc32c,		1)	\
-	x(crc64,		2)
+	x(crc64,		2)	\
+	x(xxhash,		3)
 
 enum bch_csum_opts {
 #define x(t, n) BCH_CSUM_OPT_##t = n,

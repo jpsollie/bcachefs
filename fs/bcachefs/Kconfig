@@ -35,6 +35,17 @@ config BCACHEFS_POSIX_ACL
 	depends on BCACHEFS_FS
 	select FS_POSIX_ACL
 
+config BCACHEFS_ADDITIONAL_HASHES
+	bool "bcachefs additional checksum / hashing support"
+	depends on BCACHEFS_FS
+	default n
+	select XXHASH
+	help
+	Bcachefs has support for various data/metadata checksums to provide integrity.
+	Select this option to include a number of additional algorithms which may be faster (or not) compared to default crc32/64.
+	Supported algorithms:
+		- xxhash (64-bit version only)
+
 config BCACHEFS_DEBUG
 	bool "bcachefs debugging"
 	depends on BCACHEFS_FS
