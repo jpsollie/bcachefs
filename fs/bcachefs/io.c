@@ -1784,7 +1784,7 @@ static void __bch2_read_endio(struct work_struct *work)
 		src->bi_iter			= rbio->bvec_iter;
 	}
 
-	csum = bch2_checksum_bio(c, crc.csum_type, nonce, src);
+	csum = (c->opts.nofilechecksum ? rbio->pick.crc.csum : bch2_checksum_bio(c, crc.csum_type, nonce, src));
 	if (bch2_crc_cmp(csum, rbio->pick.crc.csum))
 		goto csum_err;
 
