@@ -447,7 +447,7 @@ bch2_trans_commit_write_locked(struct btree_trans *trans,
 		h = h->next;
 	}
 
-	trans_for_each_update2(trans, i) {
+	trans_for_each_update(trans, i) {
 		/* Multiple inserts might go to same leaf: */
 		if (!same_leaf_as_prev(trans, i))
 			u64s = 0;
@@ -1327,24 +1327,23 @@ err:
  * When deleting, check if we need to emit a whiteout (because we're overwriting
  * something in an ancestor snapshot)
  */
-static int need_whiteout_for_snapshot(struct btree_trans *trans, struct btree_iter *orig)
+static int need_whiteout_for_snapshot(struct btree_trans *trans,
+				      enum btree_id btree_id, struct bpos pos)
 {
 	struct btree_iter iter;
 	struct bkey_s_c k;
-	u32 snapshot = orig->pos.snapshot;
+	u32 snapshot = pos.snapshot;
 	int ret;
 
-	if (!bch2_snapshot_parent(trans->c, snapshot))
+	if (!bch2_snapshot_parent(trans->c, pos.snapshot))
 		return 0;
 
-	bch2_trans_copy_iter(&iter, orig);
-	iter.flags &= BTREE_ITER_FILTER_SNAPSHOTS;
-	iter.flags |= BTREE_ITER_ALL_SNAPSHOTS;
+	pos.snapshot++;
 
-	bch2_btree_iter_advance(&iter);
-
-	for_each_btree_key_continue_norestart(iter, 0, k, ret) {
-		if (bkey_cmp(k.k->p, orig->pos))
+	for_each_btree_key_norestart(trans, iter, btree_id, pos,
+			   BTREE_ITER_ALL_SNAPSHOTS|
+			   BTREE_ITER_NOPRESERVE, k, ret) {
+		if (bkey_cmp(k.k->p, pos))
 			break;
 
 		if (bch2_snapshot_is_ancestor(trans->c, snapshot,
@@ -1366,8 +1365,7 @@ int __must_check bch2_trans_update_by_path(struct btree_trans *trans, struct btr
 	BUG_ON(!path->should_be_locked);
 
 	BUG_ON(trans->nr_updates >= BTREE_ITER_MAX);
-	BUG_ON(bpos_cmp(k->k.p, iter->path->pos));
-	BUG_ON(bpos_cmp(k->k.p, iter->pos));
+	BUG_ON(bpos_cmp(k->k.p, path->pos));
 
 	n = (struct btree_insert_entry) {
 		.flags		= flags,
@@ -1385,16 +1383,6 @@ int __must_check bch2_trans_update_by_path(struct btree_trans *trans, struct btr
 		BUG_ON(i != trans->updates &&
 		       btree_insert_entry_cmp(i - 1, i) >= 0);
 #endif
-
-	if (bkey_deleted(&n.k->k) &&
-	    (iter->flags & BTREE_ITER_FILTER_SNAPSHOTS)) {
-		int ret = need_whiteout_for_snapshot(trans, iter);
-		if (unlikely(ret < 0))
-			return ret;
-
-		if (ret)
-			n.k->k.type = KEY_TYPE_whiteout;
-	}
 
 	/*
 	 * Pending updates are kept sorted: first, find position of new update,
@@ -1447,13 +1435,6 @@ int __must_check bch2_trans_update(struct btree_trans *trans, struct btree_iter 
 
 	return bch2_trans_update_by_path(trans, iter->update_path ?: iter->path,
 					 k, flags);
-}
-
-void bch2_trans_commit_hook(struct btree_trans *trans,
-			    struct btree_trans_commit_hook *h)
-{
-	h->next = trans->hooks;
-	trans->hooks = h;
 }
 
 void bch2_trans_commit_hook(struct btree_trans *trans,

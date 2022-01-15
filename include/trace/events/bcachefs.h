@@ -865,120 +865,43 @@ TRACE_EVENT(trans_restart_would_deadlock,
 		  __entry->want_pos_snapshot)
 );
 
-TRACE_EVENT(trans_restart_mem_realloced,
-	TP_PROTO(unsigned long trans_ip, unsigned long caller_ip,
-		 unsigned long bytes),
-	TP_ARGS(trans_ip, caller_ip, bytes),
+TRACE_EVENT(trans_restart_would_deadlock_write,
+	TP_PROTO(const char *trans_fn),
+	TP_ARGS(trans_fn),
 
 	TP_STRUCT__entry(
-		__field(unsigned long,		trans_ip	)
+		__array(char,			trans_fn, 24	)
+	),
+
+	TP_fast_assign(
+		strncpy(__entry->trans_fn, trans_fn, sizeof(__entry->trans_fn));
+	),
+
+	TP_printk("%s", __entry->trans_fn)
+);
+
+TRACE_EVENT(trans_restart_mem_realloced,
+	TP_PROTO(const char *trans_fn,
+		 unsigned long caller_ip,
+		 unsigned long bytes),
+	TP_ARGS(trans_fn, caller_ip, bytes),
+
+	TP_STRUCT__entry(
+		__array(char,			trans_fn, 24	)
 		__field(unsigned long,		caller_ip	)
 		__field(unsigned long,		bytes		)
 	),
 
 	TP_fast_assign(
-		__entry->trans_ip	= trans_ip;
+		strncpy(__entry->trans_fn, trans_fn, sizeof(__entry->trans_fn));
 		__entry->caller_ip	= caller_ip;
 		__entry->bytes		= bytes;
 	),
 
-	TP_printk("%ps %pS bytes %lu",
-		  (void *) __entry->trans_ip,
+	TP_printk("%s %pS bytes %lu",
+		  __entry->trans_fn,
 		  (void *) __entry->caller_ip,
 		  __entry->bytes)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_journal_res_get,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_journal_preres_get,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_journal_reclaim,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_mark_replicas,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_fault_inject,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_btree_node_split,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_mark,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_upgrade,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_iter_upgrade,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_relock,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_restart_traverse,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DEFINE_EVENT(transaction_restart,	trans_traverse_all,
-	TP_PROTO(unsigned long ip),
-	TP_ARGS(ip)
-);
-
-DECLARE_EVENT_CLASS(node_lock_fail,
-	TP_PROTO(unsigned level, u32 iter_seq, unsigned node, u32 node_seq),
-	TP_ARGS(level, iter_seq, node, node_seq),
-
-	TP_STRUCT__entry(
-		__field(u32,		level)
-		__field(u32,		iter_seq)
-		__field(u32,		node)
-		__field(u32,		node_seq)
-	),
-
-	TP_fast_assign(
-		__entry->level		= level;
-		__entry->iter_seq	= iter_seq;
-		__entry->node		= node;
-		__entry->node_seq	= node_seq;
-	),
-
-	TP_printk("level %u iter seq %u node %u node seq %u",
-		  __entry->level, __entry->iter_seq,
-		  __entry->node, __entry->node_seq)
-);
-
-DEFINE_EVENT(node_lock_fail, node_upgrade_fail,
-	TP_PROTO(unsigned level, u32 iter_seq, unsigned node, u32 node_seq),
-	TP_ARGS(level, iter_seq, node, node_seq)
-);
-
-DEFINE_EVENT(node_lock_fail, node_relock_fail,
-	TP_PROTO(unsigned level, u32 iter_seq, unsigned node, u32 node_seq),
-	TP_ARGS(level, iter_seq, node, node_seq)
 );
 
 #endif /* _TRACE_BCACHE_H */
