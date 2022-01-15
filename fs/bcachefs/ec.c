@@ -1558,6 +1558,97 @@ void bch2_stripes_heap_start(struct bch_fs *c)
 			bch2_stripes_heap_insert(c, m, iter.pos);
 }
 
+static int __bch2_stripe_write_key(struct btree_trans *trans,
+				   struct btree_iter *iter,
+				   struct stripe *m,
+				   size_t idx,
+				   struct bkey_i_stripe *new_key)
+{
+	const struct bch_stripe *v;
+	struct bkey_s_c k;
+	unsigned i;
+	int ret;
+
+	bch2_btree_iter_set_pos(iter, POS(0, idx));
+
+	k = bch2_btree_iter_peek_slot(iter);
+	ret = bkey_err(k);
+	if (ret)
+		return ret;
+
+	if (k.k->type != KEY_TYPE_stripe)
+		return -EIO;
+
+	v = bkey_s_c_to_stripe(k).v;
+	for (i = 0; i < v->nr_blocks; i++)
+		if (m->block_sectors[i] != stripe_blockcount_get(v, i))
+			goto write;
+	return 0;
+write:
+	bkey_reassemble(&new_key->k_i, k);
+
+	for (i = 0; i < new_key->v.nr_blocks; i++)
+		stripe_blockcount_set(&new_key->v, i,
+				      m->block_sectors[i]);
+
+	return bch2_trans_update(trans, iter, &new_key->k_i, 0);
+}
+
+int bch2_stripes_write(struct bch_fs *c, unsigned flags)
+{
+	struct btree_trans trans;
+	struct btree_iter iter;
+	struct genradix_iter giter;
+	struct bkey_i_stripe *new_key;
+	struct stripe *m;
+	int ret = 0;
+
+	new_key = kmalloc(255 * sizeof(u64), GFP_KERNEL);
+	BUG_ON(!new_key);
+
+	bch2_trans_init(&trans, c, 0, 0);
+
+	bch2_trans_iter_init(&trans, &iter, BTREE_ID_stripes, POS_MIN,
+			     BTREE_ITER_SLOTS|BTREE_ITER_INTENT);
+
+	genradix_for_each(&c->stripes[0], giter, m) {
+		if (!m->alive)
+			continue;
+
+		ret = __bch2_trans_do(&trans, NULL, NULL,
+				      BTREE_INSERT_NOFAIL|flags,
+			__bch2_stripe_write_key(&trans, &iter, m,
+					giter.pos, new_key));
+
+		if (ret)
+			break;
+	}
+	bch2_trans_iter_exit(&trans, &iter);
+
+	bch2_trans_exit(&trans);
+
+	kfree(new_key);
+
+	return ret;
+}
+
+static int bch2_stripes_read_fn(struct btree_trans *trans, struct bkey_s_c k)
+{
+	struct bkey deleted = KEY(0, 0, 0);
+	struct bkey_s_c old = (struct bkey_s_c) { &deleted, NULL };
+	struct bch_fs *c = trans->c;
+	int ret = 0;
+
+	deleted.p = k.k->p;
+
+	if (k.k->type == KEY_TYPE_stripe)
+		ret = __ec_stripe_mem_alloc(c, k.k->p.offset, GFP_KERNEL) ?:
+			bch2_mark_key(trans, old, k,
+				      BTREE_TRIGGER_NOATOMIC);
+
+	return ret;
+}
+
 int bch2_stripes_read(struct bch_fs *c)
 {
 	struct btree_trans trans;
