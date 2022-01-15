@@ -447,7 +447,7 @@ bch2_trans_commit_write_locked(struct btree_trans *trans,
 		h = h->next;
 	}
 
-	trans_for_each_update(trans, i) {
+	trans_for_each_update2(trans, i) {
 		/* Multiple inserts might go to same leaf: */
 		if (!same_leaf_as_prev(trans, i))
 			u64s = 0;
@@ -1435,6 +1435,13 @@ int __must_check bch2_trans_update(struct btree_trans *trans, struct btree_iter 
 
 	return bch2_trans_update_by_path(trans, iter->update_path ?: iter->path,
 					 k, flags);
+}
+
+void bch2_trans_commit_hook(struct btree_trans *trans,
+			    struct btree_trans_commit_hook *h)
+{
+	h->next = trans->hooks;
+	trans->hooks = h;
 }
 
 void bch2_trans_commit_hook(struct btree_trans *trans,
