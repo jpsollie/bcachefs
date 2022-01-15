@@ -2923,6 +2923,115 @@ void *bch2_trans_kmalloc(struct btree_trans *trans, size_t size)
 			kfree(trans->mem);
 		}
 
+		best = iter;
+	}
+
+	if (!best) {
+		iter = btree_trans_iter_alloc(trans);
+		bch2_btree_iter_init(trans, iter, btree_id);
+	} else if (btree_iter_keep(trans, best)) {
+		iter = btree_trans_iter_alloc(trans);
+		btree_iter_copy(iter, best);
+	} else {
+		iter = best;
+	}
+
+	trans->iters_live	|= 1ULL << iter->idx;
+	trans->iters_touched	|= 1ULL << iter->idx;
+
+	if ((flags & BTREE_ITER_TYPE) != BTREE_ITER_NODES &&
+	    btree_node_type_is_extents(btree_id) &&
+	    !(flags & BTREE_ITER_NOT_EXTENTS) &&
+	    !(flags & BTREE_ITER_ALL_SNAPSHOTS))
+		flags |= BTREE_ITER_IS_EXTENTS;
+
+	iter->flags = flags;
+
+	iter->snapshot = pos.snapshot;
+
+	/*
+	 * If the iterator has locks_want greater than requested, we explicitly
+	 * do not downgrade it here - on transaction restart because btree node
+	 * split needs to upgrade locks, we might be putting/getting the
+	 * iterator again. Downgrading iterators only happens via an explicit
+	 * bch2_trans_downgrade().
+	 */
+
+	locks_want = min(locks_want, BTREE_MAX_DEPTH);
+	if (locks_want > iter->locks_want) {
+		iter->locks_want = locks_want;
+		btree_iter_get_locks(iter, true, false);
+	}
+
+	while (iter->level < depth) {
+		btree_node_unlock(iter, iter->level);
+		iter->l[iter->level].b = BTREE_ITER_NO_NODE_INIT;
+		iter->level++;
+	}
+
+	while (iter->level > depth)
+		iter->l[--iter->level].b = BTREE_ITER_NO_NODE_INIT;
+
+	iter->min_depth	= depth;
+
+	bch2_btree_iter_set_pos(iter, pos);
+	btree_iter_set_search_pos(iter, btree_iter_search_key(iter));
+
+	return iter;
+}
+
+struct btree_iter *bch2_trans_get_node_iter(struct btree_trans *trans,
+					    enum btree_id btree_id,
+					    struct bpos pos,
+					    unsigned locks_want,
+					    unsigned depth,
+					    unsigned flags)
+{
+	struct btree_iter *iter =
+		__bch2_trans_get_iter(trans, btree_id, pos,
+				      locks_want, depth,
+				      BTREE_ITER_NODES|
+				      BTREE_ITER_NOT_EXTENTS|
+				      BTREE_ITER_ALL_SNAPSHOTS|
+				      flags);
+
+	BUG_ON(bkey_cmp(iter->pos, pos));
+	BUG_ON(iter->locks_want != min(locks_want, BTREE_MAX_DEPTH));
+	BUG_ON(iter->level	!= depth);
+	BUG_ON(iter->min_depth	!= depth);
+	iter->ip_allocated = _RET_IP_;
+
+	return iter;
+}
+
+struct btree_iter *__bch2_trans_copy_iter(struct btree_trans *trans,
+					struct btree_iter *src)
+{
+	struct btree_iter *iter;
+
+	iter = btree_trans_iter_alloc(trans);
+	btree_iter_copy(iter, src);
+
+	trans->iters_live |= 1ULL << iter->idx;
+	/*
+	 * We don't need to preserve this iter since it's cheap to copy it
+	 * again - this will cause trans_iter_put() to free it right away:
+	 */
+	set_btree_iter_dontneed(trans, iter);
+
+	return iter;
+}
+
+void *bch2_trans_kmalloc(struct btree_trans *trans, size_t size)
+{
+	size_t new_top = trans->mem_top + size;
+	void *p;
+
+	if (new_top > trans->mem_bytes) {
+		size_t old_bytes = trans->mem_bytes;
+		size_t new_bytes = roundup_pow_of_two(new_top);
+		void *new_mem = krealloc(trans->mem, new_bytes, GFP_NOFS);
+
 		if (!new_mem)
 			return ERR_PTR(-ENOMEM);
 
@@ -2930,8 +3039,7 @@ void *bch2_trans_kmalloc(struct btree_trans *trans, size_t size)
 		trans->mem_bytes = new_bytes;
 
 		if (old_bytes) {
-			trace_trans_restart_mem_realloced(trans->fn, _RET_IP_, new_bytes);
-			btree_trans_restart(trans);
+			trace_trans_restart_mem_realloced(trans->ip, _RET_IP_, new_bytes);
 			return ERR_PTR(-EINTR);
 		}
 	}
