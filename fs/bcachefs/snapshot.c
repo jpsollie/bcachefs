@@ -146,13 +146,31 @@ bool __bch2_snapshot_is_ancestor(struct bch_fs *c, u32 id, u32 ancestor)
 		goto out;
 	}
 
-	while (id && id < ancestor - IS_ANCESTOR_BITMAP)
+#ifdef CONFIG_BCACHEFS_DEBUG
+	ret = __bch2_snapshot_is_ancestor_early(t, id, ancestor);
+
+#endif
+	while (id && id < ancestor - IS_ANCESTOR_BITMAP) {
 		id = get_ancestor_below(t, id, ancestor);
+#ifdef CONFIG_BCACHEFS_DEBUG
+		if (ret != __bch2_snapshot_is_ancestor_early(t, id, ancestor)) {
+			pr_notice("%u -> %u new ancestor_early: %u \n",
+					id, ancestor, (char) !ret);
+			ret = !ret;
+		}
+#endif
+	}
 
 	ret = id && id < ancestor
 		? test_ancestor_bitmap(t, id, ancestor)
 		: id == ancestor;
 
+#ifdef CONFIG_BCACHEFS_DEBUG
+	if (ret != __bch2_snapshot_is_ancestor_early(t, id, ancestor))
+		pr_err("id %u, ancestor %u, invalid value %u \n",
+			 id, ancestor, (char) ret);
+
+#endif
 	EBUG_ON(ret != __bch2_snapshot_is_ancestor_early(t, id, ancestor));
 out:
 	rcu_read_unlock();
