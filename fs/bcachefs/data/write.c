@@ -257,14 +257,12 @@ static inline int bch2_extent_update_i_size_sectors(struct btree_trans *trans,
 		s64 bi_sectors = le64_to_cpu(inode->v.bi_sectors);
 		if (unlikely(bi_sectors + i_sectors_delta < 0)) {
 			struct bch_fs *c = trans->c;
-			CLASS(printbuf, buf)();
-			bch2_log_msg_start(c, &buf);
-			prt_printf(&buf, "inode %llu i_sectors underflow: %lli + %lli < 0",
+
+			CLASS(bch_log_msg, msg)(c);
+			prt_printf(&msg.m, "inode %llu i_sectors underflow: %lli + %lli < 0",
 				   extent_iter->pos.inode, bi_sectors, i_sectors_delta);
 
-			bool print = bch2_count_fsck_err(c, inode_i_sectors_underflow, &buf);
-			if (print)
-				bch2_print_str(c, KERN_ERR, buf.buf);
+			msg.m.suppress = !bch2_count_fsck_err(c, inode_i_sectors_underflow, &msg.m);
 
 			if (i_sectors_delta < 0)
 				i_sectors_delta = -bi_sectors;
@@ -424,7 +422,6 @@ static int bch2_write_index_default(struct bch_write_op *op)
 
 static void bch2_log_write_error_start(struct printbuf *out, struct bch_write_op *op, u64 offset)
 {
-	bch2_log_msg_start(op->c, out);
 	prt_printf(out, "error writing data at ");
 
 	struct bpos pos = op->pos;
@@ -445,16 +442,14 @@ static void bch2_log_write_error_start(struct printbuf *out, struct bch_write_op
 
 void bch2_write_op_error(struct bch_write_op *op, u64 offset, const char *fmt, ...)
 {
-	CLASS(printbuf, buf)();
-	bch2_log_write_error_start(&buf, op, offset);
+	CLASS(bch_log_msg_ratelimited, msg)(op->c);
+
+	bch2_log_write_error_start(&msg.m, op, offset);
 
 	va_list args;
 	va_start(args, fmt);
-	prt_vprintf(&buf, fmt, args);
+	prt_vprintf(&msg.m, fmt, args);
 	va_end(args);
-	prt_newline(&buf);
-
-	bch2_print_str_ratelimited(op->c, KERN_ERR, buf.buf);
 }
 
 void bch2_submit_wbio_replicas(struct bch_write_bio *wbio, struct bch_fs *c,
@@ -596,26 +591,27 @@ static void __bch2_write_index(struct bch_write_op *op)
 	int ret = 0;
 
 	if (unlikely(op->io_error)) {
-		struct bkey_i *k = bch2_keylist_front(&op->insert_keys);
-		bool print;
-		CLASS(printbuf, buf)();
-		bch2_log_write_error_start(&buf, op, bkey_start_offset(&k->k));
-		bch2_io_failures_to_text(&buf, c, &op->wbio.failed);
-
 		ret = bch2_write_drop_io_error_ptrs(op);
-		if (!ret) {
-			prt_printf(&buf, "wrote degraded to ");
-			struct bch_devs_list d = bch2_bkey_devs(c, bkey_i_to_s_c(k));
-			bch2_devs_list_to_text(&buf, c, &d);
-			prt_newline(&buf);
-			print = !bch2_ratelimit(); /* Different ratelimits for hard and soft errors */
-		} else {
-			prt_printf(&buf, "all replicated writes failed\n");
-			print = !bch2_ratelimit();
-		}
 
-		if (print)
-			bch2_print_str(c, KERN_ERR, buf.buf);
+		CLASS(bch_log_msg, msg)(c);
+
+		/* Separate ratelimit_states for hard and soft errors */
+		msg.m.suppress = !ret
+			? bch2_ratelimit(c)
+			: bch2_ratelimit(c);
+
+		struct bkey_i *k = bch2_keylist_front(&op->insert_keys);
+		bch2_log_write_error_start(&msg.m, op, bkey_start_offset(&k->k));
+		bch2_io_failures_to_text(&msg.m, c, &op->wbio.failed);
+
+		if (!ret) {
+			prt_printf(&msg.m, "wrote degraded to ");
+			struct bch_devs_list d = bch2_bkey_devs(c, bkey_i_to_s_c(k));
+			bch2_devs_list_to_text(&msg.m, c, &d);
+			prt_newline(&msg.m);
+		} else {
+			prt_printf(&msg.m, "error %s\n", bch2_err_str(ret));
+		}
 
 		if (ret)
 			goto err;

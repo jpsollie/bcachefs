@@ -537,14 +537,10 @@ static int bch2_topology_check_root(struct btree_trans *trans, enum btree_id btr
 	if (!r->error)
 		return 0;
 
-	CLASS(printbuf, buf)();
-	bch2_log_msg_start(c, &buf);
-	prt_printf(&buf, "btree root ");
-	bch2_btree_id_to_text(&buf, btree);
-	prt_printf(&buf, " unreadable: %s\n", bch2_err_str(r->error));
-
-	int ret = 0;
-	bool print = true;
+	CLASS(bch_log_msg, msg)(c);
+	prt_printf(&msg.m, "btree root ");
+	bch2_btree_id_to_text(&msg.m, btree);
+	prt_printf(&msg.m, " unreadable: %s\n", bch2_err_str(r->error));
 
 	if (!btree_id_recovers_from_scan(btree)) {
 		r->alive = false;
@@ -552,22 +548,19 @@ static int bch2_topology_check_root(struct btree_trans *trans, enum btree_id btr
 		bch2_btree_root_alloc_fake_trans(trans, btree, 0);
 		*reconstructed_root = true;
 
-		ret = bch2_btree_lost_data(c, &buf, btree);
+		try(bch2_btree_lost_data(c, &msg.m, btree));
 	} else {
-		ret = bch2_btree_has_scanned_nodes(c, btree, &buf);
+		int ret = bch2_btree_has_scanned_nodes(c, btree, &msg.m);
+		if (ret < 0)
+			return ret;
 
-		if (ret < 0) {
-			/*
-			 * just log our message, we'll be rewinding to run
-			 * btree node scan
-			 */
-		} else if (!ret) {
-			print = false;
+		if (!ret) {
+			msg.m.suppress = true;
 
-			__fsck_err(trans,
-				   FSCK_CAN_FIX|(btree_id_can_reconstruct(btree) ? FSCK_AUTOFIX : 0),
-				   btree_root_unreadable_and_scan_found_nothing,
-				   "%sbtree node scan found no nodes, continue?", buf.buf);
+			__ret_fsck_err(trans,
+				       FSCK_CAN_FIX|(btree_id_can_reconstruct(btree) ? FSCK_AUTOFIX : 0),
+				       btree_root_unreadable_and_scan_found_nothing,
+				       "%sbtree node scan found no nodes, continue?", msg.m.buf);
 
 			r->alive = false;
 			r->error = 0;
@@ -582,37 +575,39 @@ static int bch2_topology_check_root(struct btree_trans *trans, enum btree_id btr
 			bch2_shoot_down_journal_keys(c, btree, 1, BTREE_MAX_DEPTH, POS_MIN, SPOS_MAX);
 
 			size_t nodes_found = 0;
-			try(bch2_get_scanned_nodes(c, btree, 0, POS_MIN, SPOS_MAX, &buf, &nodes_found));
+			try(bch2_get_scanned_nodes(c, btree, 0, POS_MIN, SPOS_MAX, &msg.m, &nodes_found));
 		}
 	}
 
-	if (print)
-		bch2_print_str(c, KERN_NOTICE, buf.buf);
-fsck_err:
-	bch_err_fn(c, ret);
-	return ret;
+	return 0;
+}
+
+static void ratelimit_reset(struct ratelimit_state *rs)
+{
+	guard(raw_spinlock)(&rs->lock);
+	atomic_set(&rs->rs_n_left, 0);
+	atomic_set(&rs->missed, 0);
+	rs->flags = 0;
+	rs->begin = 0;
 }
 
 int bch2_check_topology(struct bch_fs *c)
 {
 	CLASS(btree_trans, trans)(c);
-	int ret = 0;
 
 	bch2_trans_srcu_unlock(trans);
 
-	for (unsigned i = 0; i < btree_id_nr_alive(c) && !ret; i++) {
+	for (unsigned i = 0; i < btree_id_nr_alive(c); i++) {
 		bool reconstructed_root = false;
 recover:
-		ret = lockrestart_do(trans, bch2_topology_check_root(trans, i, &reconstructed_root));
-		if (ret)
-			break;
+		try(lockrestart_do(trans, bch2_topology_check_root(trans, i, &reconstructed_root)));
 
 		struct btree_root *r = bch2_btree_id_root(c, i);
 		struct btree *b = r->b;
 
 		btree_node_lock_nopath_nofail(trans, &b->c, SIX_LOCK_read);
-		ret =   btree_check_root_boundaries(trans, b) ?:
-			bch2_btree_repair_topology_recurse(trans, b);
+		int ret = btree_check_root_boundaries(trans, b) ?:
+			  bch2_btree_repair_topology_recurse(trans, b);
 		six_unlock_read(&b->c.lock);
 
 		if (bch2_err_matches(ret, BCH_ERR_topology_repair_drop_this_node)) {
@@ -633,9 +628,19 @@ recover:
 			r->alive = false;
 			ret = 0;
 		}
+
+		if (ret)
+			return ret;
 	}
 
-	return ret;
+	/*
+	 * post topology repair there should be no errored nodes; reset
+	 * ratelimiters so we see new unexpected errors
+	 */
+	ratelimit_reset(&c->btree.read_errors_soft);
+	ratelimit_reset(&c->btree.read_errors_hard);
+
+	return 0;
 }
 
 /* marking of btree keys/nodes: */
@@ -697,7 +702,7 @@ static int bch2_gc_mark_key(struct btree_trans *trans, enum btree_id btree_id,
 	if (bch2_trans_has_updates(trans)) {
 		CLASS(disk_reservation, res)(c);
 		return bch2_trans_commit(trans, &res.r, NULL, BCH_TRANS_COMMIT_no_enospc) ?:
-			-BCH_ERR_transaction_restart_nested;
+			bch_err_throw(c, transaction_restart_commit);
 	}
 
 	try(bch2_key_trigger(trans, btree_id, level, old, unsafe_bkey_s_c_to_s(k),

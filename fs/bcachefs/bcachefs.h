@@ -304,6 +304,7 @@
 
 #define bch2_fmt(_c, fmt)		bch2_log_msg(_c, fmt "\n")
 
+void bch2_print_str_loglevel(struct bch_fs *, int, const char *);
 void bch2_print_str(struct bch_fs *, const char *, const char *);
 
 __printf(2, 3)
@@ -318,25 +319,22 @@ void __bch2_print(struct bch_fs *c, const char *fmt, ...);
 
 #define bch2_print(_c, ...) __bch2_print(maybe_dev_to_fs(_c), __VA_ARGS__)
 
-#define bch2_ratelimit()						\
+#define __bch2_ratelimit(_c, _rs)					\
+	(!(_c)->opts.ratelimit_errors || !__ratelimit(_rs))
+
+#define bch2_ratelimit(_c)						\
 ({									\
 	static DEFINE_RATELIMIT_STATE(rs,				\
 				      DEFAULT_RATELIMIT_INTERVAL,	\
 				      DEFAULT_RATELIMIT_BURST);		\
 									\
-	!__ratelimit(&rs);						\
+	__bch2_ratelimit(_c, &rs);					\
 })
 
 #define bch2_print_ratelimited(_c, ...)					\
 do {									\
-	if (!bch2_ratelimit())						\
+	if (!bch2_ratelimit(_c))					\
 		bch2_print(_c, __VA_ARGS__);				\
-} while (0)
-
-#define bch2_print_str_ratelimited(_c, ...)				\
-do {									\
-	if (!bch2_ratelimit())						\
-		bch2_print_str(_c, __VA_ARGS__);			\
 } while (0)
 
 #define bch_log(c, loglevel, fmt, ...) \
@@ -362,21 +360,11 @@ do {									\
 #define bch_info_dev(ca, ...)		bch_dev_log(ca, KERN_INFO, __VA_ARGS__)
 #define bch_verbose_dev(ca, ...)	bch_dev_log(ca, KERN_DEBUG, __VA_ARGS__)
 
-#define bch_err_dev_offset(ca, _offset, fmt, ...) \
-	bch2_print(c, KERN_ERR bch2_fmt_dev_offset(ca, _offset, fmt), ##__VA_ARGS__)
-#define bch_err_inum(c, _inum, fmt, ...) \
-	bch2_print(c, KERN_ERR bch2_fmt_inum(c, _inum, fmt), ##__VA_ARGS__)
-#define bch_err_inum_offset(c, _inum, _offset, fmt, ...) \
-	bch2_print(c, KERN_ERR bch2_fmt_inum_offset(c, _inum, _offset, fmt), ##__VA_ARGS__)
-
-#define bch_err_dev_ratelimited(ca, fmt, ...) \
-	bch2_print_ratelimited(ca, KERN_ERR bch2_fmt_dev(ca, fmt), ##__VA_ARGS__)
-#define bch_err_dev_offset_ratelimited(ca, _offset, fmt, ...) \
-	bch2_print_ratelimited(ca, KERN_ERR bch2_fmt_dev_offset(ca, _offset, fmt), ##__VA_ARGS__)
-#define bch_err_inum_ratelimited(c, _inum, fmt, ...) \
-	bch2_print_ratelimited(c, KERN_ERR bch2_fmt_inum(c, _inum, fmt), ##__VA_ARGS__)
-#define bch_err_inum_offset_ratelimited(c, _inum, _offset, fmt, ...) \
-	bch2_print_ratelimited(c, KERN_ERR bch2_fmt_inum_offset(c, _inum, _offset, fmt), ##__VA_ARGS__)
+#define bch_err_dev_ratelimited(ca, ...)				\
+do {									\
+	if (!bch2_ratelimit(ca->fs))					\
+		bch_err_dev(ca, __VA_ARGS__);				\
+} while (0)
 
 static inline bool should_print_err(int err)
 {
@@ -894,7 +882,9 @@ struct bch_fs {
 	reflink_gc_table	reflink_gc_table;
 	size_t			reflink_gc_nr;
 
+#ifndef NO_BCACHEFS_FS
 	struct bch_fs_vfs	vfs;
+#endif
 
 	/* QUOTAS */
 	struct bch_memquota_type quotas[QTYP_NR];
@@ -1056,5 +1046,58 @@ static inline bool bch2_dev_rotational(struct bch_fs *c, unsigned dev)
 {
 	return dev != BCH_SB_MEMBER_INVALID && test_bit(dev, c->devs_rotational.d);
 }
+
+void __bch2_log_msg_start(const char *, struct printbuf *);
+
+static inline void bch2_log_msg_start(struct bch_fs *c, struct printbuf *out)
+{
+	__bch2_log_msg_start(c->name, out);
+}
+
+struct bch_log_msg {
+	struct bch_fs	*c;
+	u8		loglevel;
+	struct printbuf	m;
+};
+
+static inline void bch2_log_msg_exit(struct bch_log_msg *msg)
+{
+	if (!msg->m.suppress)
+		bch2_print_str_loglevel(msg->c, msg->loglevel, msg->m.buf);
+	printbuf_exit(&msg->m);
+}
+
+static inline struct bch_log_msg bch2_log_msg_init(struct bch_fs *c,
+						   unsigned loglevel,
+						   bool suppress)
+{
+	struct printbuf buf = PRINTBUF;
+	bch2_log_msg_start(c, &buf);
+	return (struct bch_log_msg) {
+		.c		= c,
+		.loglevel	= loglevel,
+		.m		= buf,
+	};
+}
+
+DEFINE_CLASS(bch_log_msg, struct bch_log_msg,
+	     bch2_log_msg_exit(&_T),
+	     bch2_log_msg_init(c, 3, false), /* 3 == KERN_ERR */
+	     struct bch_fs *c)
+
+EXTEND_CLASS(bch_log_msg, _level,
+	     bch2_log_msg_init(c, loglevel, false),
+	     struct bch_fs *c, unsigned loglevel)
+
+/*
+ * Open coded EXTEND_CLASS, because we need the constructor to be a macro for
+ * ratelimiting to work correctly
+ */
+
+typedef class_bch_log_msg_t class_bch_log_msg_ratelimited_t;
+
+static inline void class_bch_log_msg_ratelimited_destructor(class_bch_log_msg_t *p)
+{ bch2_log_msg_exit(p); }
+#define class_bch_log_msg_ratelimited_constructor(_c)	bch2_log_msg_init(_c, 3, bch2_ratelimit(_c))
 
 #endif /* _BCACHEFS_H */

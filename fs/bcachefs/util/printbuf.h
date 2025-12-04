@@ -87,10 +87,10 @@ struct printbuf {
 	bool			allocation_failure:1;
 	bool			heap_allocated:1;
 	bool			overflow:1;
+	bool			suppress:1; /* Ratelimited or already printed */
 	enum printbuf_si	si_units:1;
 	bool			human_readable_units:1;
 	bool			has_indent_or_tabstops:1;
-	bool			suppress_indent_tabstop_handling:1;
 	u8			nr_tabstops;
 
 	/*

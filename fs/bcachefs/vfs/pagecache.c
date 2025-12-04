@@ -361,14 +361,14 @@ int bch2_get_folio_disk_reservation(struct bch_fs *c,
 				struct bch_inode_info *inode,
 				struct folio *folio, bool check_enospc)
 {
-	struct bch_folio *s = bch2_folio_create(folio, 0);
+	struct bch_folio *s = bch2_folio(folio);
 	unsigned nr_replicas = inode_nr_replicas(c, inode);
 	struct disk_reservation disk_res = { 0 };
 	unsigned i, sectors = folio_sectors(folio), disk_res_sectors = 0;
 	int ret;
 
-	if (!s)
-		return -ENOMEM;
+	BUG_ON(!s);
+	EBUG_ON(!s->uptodate);
 
 	for (i = 0; i < sectors; i++)
 		disk_res_sectors += sectors_to_reserve(&s->s[i], nr_replicas);
@@ -399,21 +399,19 @@ void bch2_folio_reservation_put(struct bch_fs *c,
 	bch2_quota_reservation_put(c, inode, &res->quota);
 }
 
-static int __bch2_folio_reservation_get(struct bch_fs *c,
+static ssize_t __bch2_folio_reservation_get(struct bch_fs *c,
 			struct bch_inode_info *inode,
 			struct folio *folio,
 			struct bch2_folio_reservation *res,
 			size_t offset, size_t len,
 			bool partial)
 {
-	struct bch_folio *s = bch2_folio_create(folio, 0);
+	struct bch_folio *s = bch2_folio(folio);
 	unsigned i, disk_sectors = 0, quota_sectors = 0;
 	size_t reserved = len;
 	int ret;
 
-	if (!s)
-		return -ENOMEM;
-
+	BUG_ON(!s);
 	BUG_ON(!s->uptodate);
 
 	for (i = round_down(offset, block_bytes(c)) >> 9;
@@ -468,7 +466,7 @@ int bch2_folio_reservation_get(struct bch_fs *c,
 			struct bch2_folio_reservation *res,
 			size_t offset, size_t len)
 {
-	return __bch2_folio_reservation_get(c, inode, folio, res, offset, len, false);
+	return (int)__bch2_folio_reservation_get(c, inode, folio, res, offset, len, false);
 }
 
 ssize_t bch2_folio_reservation_get_partial(struct bch_fs *c,
@@ -512,7 +510,7 @@ void bch2_set_folio_dirty(struct bch_fs *c,
 			  struct bch_inode_info *inode,
 			  struct folio *folio,
 			  struct bch2_folio_reservation *res,
-			  unsigned offset, unsigned len)
+			  size_t offset, size_t len)
 {
 	struct bch_folio *s = bch2_folio(folio);
 	unsigned i, dirty_sectors = 0;
@@ -520,7 +518,9 @@ void bch2_set_folio_dirty(struct bch_fs *c,
 	WARN_ON((u64) folio_pos(folio) + offset + len >
 		round_up((u64) i_size_read(&inode->v), block_bytes(c)));
 
+	BUG_ON(!s);
 	BUG_ON(!s->uptodate);
+	EBUG_ON(round_up(offset + len, block_bytes(c)) >> 9 > UINT_MAX);
 
 	scoped_guard(spinlock, &s->lock)
 		for (i = round_down(offset, block_bytes(c)) >> 9;
@@ -598,7 +598,7 @@ vm_fault_t bch2_page_mkwrite(struct vm_fault *vmf)
 	vm_fault_t ret;
 
 	loff_t file_offset = round_down(vmf->pgoff << PAGE_SHIFT, block_bytes(c));
-	unsigned offset = file_offset - folio_pos(folio);
+	size_t offset = file_offset - folio_pos(folio);
 	unsigned len = max(PAGE_SIZE, block_bytes(c));
 
 	BUG_ON(offset + len > folio_size(folio));
