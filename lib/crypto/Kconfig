@@ -90,7 +90,7 @@ config CRYPTO_LIB_MD5_ARCH
 	default y if SPARC64
 
 config CRYPTO_LIB_POLY1305
-	tristate
+	tristate "Poly1305 authentication algorithm"
 	help
 	  The Poly1305 library functions.  Select this if your module uses any
 	  of the functions from <crypto/poly1305.h>.

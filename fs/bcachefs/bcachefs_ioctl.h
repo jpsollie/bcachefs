@@ -5,7 +5,7 @@
 #include <linux/uuid.h>
 #include <asm/ioctl.h>
 #include "bcachefs_format.h"
-#include "bkey_types.h"
+#include "btree/bkey_types.h"
 
 /*
  * Flags common to multiple ioctls:
@@ -35,63 +35,56 @@
  */
 #define BCH_READ_DEV			(1 << 5)
 
-/* global control dev: */
-
-/* These are currently broken, and probably unnecessary: */
-#if 0
-#define BCH_IOCTL_ASSEMBLE	_IOW(0xbc, 1, struct bch_ioctl_assemble)
-#define BCH_IOCTL_INCREMENTAL	_IOW(0xbc, 2, struct bch_ioctl_incremental)
-
-struct bch_ioctl_assemble {
-	__u32			flags;
-	__u32			nr_devs;
-	__u64			pad;
-	__u64			devs[];
-};
-
-struct bch_ioctl_incremental {
-	__u32			flags;
-	__u64			pad;
-	__u64			dev;
-};
-#endif
-
 /* filesystem ioctls: */
 
 #define BCH_IOCTL_QUERY_UUID	_IOR(0xbc,	1,  struct bch_ioctl_query_uuid)
 
-/* These only make sense when we also have incremental assembly */
-#if 0
-#define BCH_IOCTL_START		_IOW(0xbc,	2,  struct bch_ioctl_start)
-#define BCH_IOCTL_STOP		_IO(0xbc,	3)
-#endif
+#define BCH_IOCTL_DISK_ADD		_IOW(0xbc,	4,  struct bch_ioctl_disk)
+#define BCH_IOCTL_DISK_ADD_v2		_IOW(0xbc,	23, struct bch_ioctl_disk_v2)
+#define BCH_IOCTL_DISK_REMOVE		_IOW(0xbc,	5,  struct bch_ioctl_disk)
+#define BCH_IOCTL_DISK_REMOVE_v2	_IOW(0xbc,	24, struct bch_ioctl_disk_v2)
+#define BCH_IOCTL_DISK_ONLINE		_IOW(0xbc,	6,  struct bch_ioctl_disk)
+#define BCH_IOCTL_DISK_ONLINE_v2	_IOW(0xbc,	25, struct bch_ioctl_disk_v2)
+#define BCH_IOCTL_DISK_OFFLINE		_IOW(0xbc,	7,  struct bch_ioctl_disk)
+#define BCH_IOCTL_DISK_OFFLINE_v2	_IOW(0xbc,	26, struct bch_ioctl_disk_v2)
+#define BCH_IOCTL_DISK_SET_STATE	_IOW(0xbc,	8,  struct bch_ioctl_disk_set_state)
+#define BCH_IOCTL_DISK_SET_STATE_v2	_IOW(0xbc,	22, struct bch_ioctl_disk_set_state_v2)
+#define BCH_IOCTL_DATA			_IOW(0xbc,	10, struct bch_ioctl_data)
+#define BCH_IOCTL_FS_USAGE		_IOWR(0xbc,	11, struct bch_ioctl_fs_usage)
+#define BCH_IOCTL_DEV_USAGE		_IOWR(0xbc,	11, struct bch_ioctl_dev_usage)
+#define BCH_IOCTL_READ_SUPER		_IOW(0xbc,	12, struct bch_ioctl_read_super)
+#define BCH_IOCTL_DISK_GET_IDX		_IOW(0xbc,	13, struct bch_ioctl_disk_get_idx)
+#define BCH_IOCTL_DISK_RESIZE		_IOW(0xbc,	14, struct bch_ioctl_disk_resize)
+#define BCH_IOCTL_DISK_RESIZE_v2	_IOW(0xbc,	27, struct bch_ioctl_disk_resize_v2)
+#define BCH_IOCTL_DISK_RESIZE_JOURNAL	_IOW(0xbc,	15, struct bch_ioctl_disk_resize_journal)
+#define BCH_IOCTL_DISK_RESIZE_JOURNAL_v2 _IOW(0xbc,	28, struct bch_ioctl_disk_resize_journal_v2)
 
-#define BCH_IOCTL_DISK_ADD	_IOW(0xbc,	4,  struct bch_ioctl_disk)
-#define BCH_IOCTL_DISK_REMOVE	_IOW(0xbc,	5,  struct bch_ioctl_disk)
-#define BCH_IOCTL_DISK_ONLINE	_IOW(0xbc,	6,  struct bch_ioctl_disk)
-#define BCH_IOCTL_DISK_OFFLINE	_IOW(0xbc,	7,  struct bch_ioctl_disk)
-#define BCH_IOCTL_DISK_SET_STATE _IOW(0xbc,	8,  struct bch_ioctl_disk_set_state)
-#define BCH_IOCTL_DATA		_IOW(0xbc,	10, struct bch_ioctl_data)
-#define BCH_IOCTL_FS_USAGE	_IOWR(0xbc,	11, struct bch_ioctl_fs_usage)
-#define BCH_IOCTL_DEV_USAGE	_IOWR(0xbc,	11, struct bch_ioctl_dev_usage)
-#define BCH_IOCTL_READ_SUPER	_IOW(0xbc,	12, struct bch_ioctl_read_super)
-#define BCH_IOCTL_DISK_GET_IDX	_IOW(0xbc,	13,  struct bch_ioctl_disk_get_idx)
-#define BCH_IOCTL_DISK_RESIZE	_IOW(0xbc,	14,  struct bch_ioctl_disk_resize)
-#define BCH_IOCTL_DISK_RESIZE_JOURNAL _IOW(0xbc,15,  struct bch_ioctl_disk_resize_journal)
+#define BCH_IOCTL_SUBVOLUME_CREATE	_IOW(0xbc,	16, struct bch_ioctl_subvolume)
+#define BCH_IOCTL_SUBVOLUME_CREATE_v2	_IOW(0xbc,	29, struct bch_ioctl_subvolume_v2)
+#define BCH_IOCTL_SUBVOLUME_DESTROY	_IOW(0xbc,	17, struct bch_ioctl_subvolume)
+#define BCH_IOCTL_SUBVOLUME_DESTROY_v2	_IOW(0xbc,	30, struct bch_ioctl_subvolume_v2)
 
-#define BCH_IOCTL_SUBVOLUME_CREATE _IOW(0xbc,	16,  struct bch_ioctl_subvolume)
-#define BCH_IOCTL_SUBVOLUME_DESTROY _IOW(0xbc,	17,  struct bch_ioctl_subvolume)
+#define BCH_IOCTL_DEV_USAGE_V2		_IOWR(0xbc,	18, struct bch_ioctl_dev_usage_v2)
 
-#define BCH_IOCTL_DEV_USAGE_V2	_IOWR(0xbc,	18, struct bch_ioctl_dev_usage_v2)
-
-#define BCH_IOCTL_FSCK_OFFLINE	_IOW(0xbc,	19,  struct bch_ioctl_fsck_offline)
-#define BCH_IOCTL_FSCK_ONLINE	_IOW(0xbc,	20,  struct bch_ioctl_fsck_online)
-#define BCH_IOCTL_QUERY_ACCOUNTING _IOW(0xbc,	21,  struct bch_ioctl_query_accounting)
-#define BCH_IOCTL_QUERY_COUNTERS _IOW(0xbc,	21,  struct bch_ioctl_query_counters)
+#define BCH_IOCTL_FSCK_OFFLINE		_IOW(0xbc,	19, struct bch_ioctl_fsck_offline)
+#define BCH_IOCTL_FSCK_ONLINE		_IOW(0xbc,	20, struct bch_ioctl_fsck_online)
+#define BCH_IOCTL_QUERY_ACCOUNTING	_IOW(0xbc,	21, struct bch_ioctl_query_accounting)
+#define BCH_IOCTL_QUERY_COUNTERS	_IOW(0xbc,	21, struct bch_ioctl_query_counters)
+#define BCH_IOCTL_SUBVOLUME_LIST	_IOWR(0xbc,	31, struct bch_ioctl_subvol_readdir)
+#define BCH_IOCTL_SUBVOLUME_TO_PATH	_IOWR(0xbc,	32, struct bch_ioctl_subvol_to_path)
+#define BCH_IOCTL_SNAPSHOT_TREE		_IOWR(0xbc,	33, struct bch_ioctl_snapshot_tree_query)
 
 /* ioctl below act on a particular file, not the filesystem as a whole: */
 
 #define BCHFS_IOC_REINHERIT_ATTRS	_IOR(0xbc, 64, const char __user *)
+#define BCHFS_IOC_SET_REFLINK_P_MAY_UPDATE_OPTS	_IO(0xbc, 65)
+#define BCHFS_IOC_PROPAGATE_REFLINK_P_OPTS	_IO(0xbc, 66)
+
+struct bch_ioctl_err_msg {
+	__u64			msg_ptr;
+	__u32			msg_len;
+	__u32			pad;
+};
 
 /*
  * BCH_IOCTL_QUERY_UUID: get filesystem UUID
@@ -103,13 +96,6 @@ struct bch_ioctl_incremental {
 struct bch_ioctl_query_uuid {
 	__uuid_t		uuid;
 };
-
-#if 0
-struct bch_ioctl_start {
-	__u32			flags;
-	__u32			pad;
-};
-#endif
 
 /*
  * BCH_IOCTL_DISK_ADD: add a new device to an existing filesystem
@@ -164,6 +150,13 @@ struct bch_ioctl_disk {
 	__u64			dev;
 };
 
+struct bch_ioctl_disk_v2 {
+	__u32				flags;
+	__u32				pad;
+	__u64				dev;
+	struct bch_ioctl_err_msg	err;
+};
+
 /*
  * BCH_IOCTL_DISK_SET_STATE: modify state of a member device of a filesystem
  *
@@ -179,6 +172,14 @@ struct bch_ioctl_disk_set_state {
 	__u8			new_state;
 	__u8			pad[3];
 	__u64			dev;
+};
+
+struct bch_ioctl_disk_set_state_v2 {
+	__u32				flags;
+	__u8				new_state;
+	__u8				pad[3];
+	__u64				dev;
+	struct bch_ioctl_err_msg	err;
 };
 
 #define BCH_DATA_OPS()			\
@@ -392,6 +393,14 @@ struct bch_ioctl_disk_resize {
 	__u64			nbuckets;
 };
 
+struct bch_ioctl_disk_resize_v2 {
+	__u32				flags;
+	__u32				pad;
+	__u64				dev;
+	__u64				nbuckets;
+	struct bch_ioctl_err_msg	err;
+};
+
 /*
  * BCH_IOCTL_DISK_RESIZE_JOURNAL: resize journal on a device
  *
@@ -405,6 +414,14 @@ struct bch_ioctl_disk_resize_journal {
 	__u64			nbuckets;
 };
 
+struct bch_ioctl_disk_resize_journal_v2 {
+	__u32				flags;
+	__u32				pad;
+	__u64				dev;
+	__u64				nbuckets;
+	struct bch_ioctl_err_msg	err;
+};
+
 struct bch_ioctl_subvolume {
 	__u32			flags;
 	__u32			dirfd;
@@ -412,6 +429,16 @@ struct bch_ioctl_subvolume {
 	__u16			pad[3];
 	__u64			dst_ptr;
 	__u64			src_ptr;
+};
+
+struct bch_ioctl_subvolume_v2 {
+	__u32			flags;
+	__u32			dirfd;
+	__u16			mode;
+	__u16			pad[3];
+	__u64			dst_ptr;
+	__u64			src_ptr;
+	struct bch_ioctl_err_msg	err;
 };
 
 #define BCH_SUBVOL_SNAPSHOT_CREATE	(1U << 0)
@@ -425,7 +452,12 @@ struct bch_ioctl_fsck_offline {
 	__u64			flags;
 	__u64			opts;		/* string */
 	__u64			nr_devs;
-	__u64			devs[] __counted_by(nr_devs);
+	/*
+	 * Do not re-add __counted_by() here: there's a compiler bug that causes
+	 * a bounds check to happen, even when it's a userspace pointer
+	 * (properly marked as __user)
+	 */
+	__u64			devs[];
 };
 
 /*
@@ -468,6 +500,101 @@ struct bch_ioctl_query_counters {
 	__u16			flags;
 	__u32			pad;
 	__u64			d[];
+};
+
+struct bch_ioctl_subvol_dirent {
+	__u32			reclen;
+	__u32			subvolid;
+	__u32			flags;
+	__u32			snapshot_parent;
+	__u64			otime_sec;
+	__u32			otime_nsec;
+	__u32			pad;
+	char			path[];
+};
+
+/*
+ * The path is NUL-terminated, but reclen is 8-byte aligned so there may
+ * be extra NUL padding beyond the terminator.
+ */
+static inline __u32 bch_ioctl_subvol_dirent_path_len(struct bch_ioctl_subvol_dirent *d)
+{
+	return strnlen(d->path,
+		       d->reclen - offsetof(struct bch_ioctl_subvol_dirent, path));
+}
+
+/*
+ * BCH_IOCTL_SUBVOLUME_LIST: list child subvolumes of a given parent,
+ * readdir style.
+ *
+ * Parent subvolume is determined from the directory fd used for the ioctl.
+ *
+ * @pos		- in/out: cursor (child subvolid); 0 to start
+ * @buf_size	- size of buffer in bytes
+ * @buf		- pointer to userspace buffer for entries
+ * @used	- out: bytes written to buffer
+ *
+ * Each entry in the buffer is a struct bch_ioctl_subvol_dirent with a
+ * variable-length NUL-terminated path (relative to the parent subvolume
+ * root), padded to 8-byte alignment.
+ *
+ * Returns 0 on success (used == 0 means no more entries).
+ */
+struct bch_ioctl_subvol_readdir {
+	__u32			pos;
+	__u32			buf_size;
+	__u64			buf;
+	__u32			used;
+	__u32			pad;
+};
+
+/*
+ * BCH_IOCTL_SUBVOLUME_TO_PATH: resolve a subvolume ID to its filesystem path,
+ * relative to the directory fd used for the ioctl.
+ *
+ * @subvolid	- subvolume ID to resolve
+ * @buf_size	- size of userspace buffer in bytes
+ * @buf		- pointer to userspace buffer for NUL-terminated path
+ *
+ * Returns 0 on success, -ENOENT if the subvolume doesn't exist or isn't
+ * reachable from the fd, -ERANGE if the buffer is too small.
+ */
+struct bch_ioctl_subvol_to_path {
+	__u32			subvolid;
+	__u32			buf_size;
+	__u64			buf;
+};
+
+/*
+ * BCH_IOCTL_SNAPSHOT_TREE: return the full snapshot tree (interior + leaf
+ * nodes) with per-node disk accounting.
+ *
+ * @tree_id	- snapshot tree to query; 0 = infer from fd's subvolume
+ * @master_subvol - out: master subvolume of this tree
+ * @root_snapshot - out: root snapshot ID
+ * @nr		- in: capacity of nodes[]; out: entries returned
+ * @total	- out: total nodes in tree
+ *
+ * Returns -ERANGE if nr < total (nr and total are still written back)
+ */
+struct bch_ioctl_snapshot_node {
+	__u32			id;		/* snapshot ID */
+	__u32			parent;		/* parent snapshot ID, 0 for root */
+	__u32			children[2];
+	__u32			subvol;		/* subvolume ID, 0 for interior */
+	__u32			flags;
+	__u32			pad[2];
+	__u64			sectors;	/* BCH_DISK_ACCOUNTING_snapshot */
+};
+
+struct bch_ioctl_snapshot_tree_query {
+	__u32			tree_id;	/* in: 0 = infer from fd's subvol */
+	__u32			master_subvol;	/* out */
+	__u32			root_snapshot;	/* out */
+	__u32			nr;		/* in: capacity; out: returned */
+	__u32			total;		/* out: total nodes */
+	__u32			pad;
+	struct bch_ioctl_snapshot_node nodes[];
 };
 
 #endif /* _BCACHEFS_IOCTL_H */
