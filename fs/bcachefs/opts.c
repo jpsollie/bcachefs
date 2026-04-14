@@ -118,6 +118,11 @@ static const char * const __bch2_key_type_error_reasons[] = {
 	NULL
 };
 
+const char * const bch2_scrub_journal_opts[] = {
+	BCH_SCRUB_JOURNAL_OPTS()
+	NULL
+};
+
 #undef x
 
 static void prt_str_opt_boundscheck(struct printbuf *out, const char * const opts[],
@@ -244,11 +249,15 @@ typedef u64 (*sb_opt_get_fn)(const struct bch_sb *);
 typedef void (*sb_opt_set_fn)(struct bch_sb *, u64);
 typedef u64 (*member_opt_get_fn)(const struct bch_member *);
 typedef void (*member_opt_set_fn)(struct bch_member *, u64);
+typedef u64 (*ext_opt_get_fn)(const struct bch_sb_field_ext *);
+typedef void (*ext_opt_set_fn)(struct bch_sb_field_ext *, u64);
 
 __maybe_unused static const sb_opt_get_fn	BCH2_NO_SB_OPT = NULL;
 __maybe_unused static const sb_opt_set_fn	SET_BCH2_NO_SB_OPT = NULL;
 __maybe_unused static const member_opt_get_fn	BCH2_NO_MEMBER_OPT = NULL;
 __maybe_unused static const member_opt_set_fn	SET_BCH2_NO_MEMBER_OPT = NULL;
+__maybe_unused static const ext_opt_get_fn	BCH2_NO_EXT_OPT = NULL;
+__maybe_unused static const ext_opt_set_fn	SET_BCH2_NO_EXT_OPT = NULL;
 
 #define type_compatible_or_null(_p, _type)				\
 	__builtin_choose_expr(						\
@@ -279,6 +288,8 @@ const struct bch_option bch2_opt_table[] = {
 		.set_sb		= type_compatible_or_null(SET_##_sb_opt,*SET_BCH2_NO_SB_OPT),	\
 		.get_member	= type_compatible_or_null(_sb_opt,	*BCH2_NO_MEMBER_OPT),	\
 		.set_member	= type_compatible_or_null(SET_##_sb_opt,*SET_BCH2_NO_MEMBER_OPT),\
+		.get_ext	= type_compatible_or_null(_sb_opt,	*BCH2_NO_EXT_OPT),	\
+		.set_ext	= type_compatible_or_null(SET_##_sb_opt,*SET_BCH2_NO_EXT_OPT),	\
 		_type							\
 	},
 
@@ -408,7 +419,7 @@ int bch2_opt_parse(struct bch_fs *c,
 		if (!val) {
 			prt_printf(err, "%s: required value",
 				   opt->attr.name);
-			return -EINVAL;
+			return -BCH_ERR_EINVAL_opt_parse_uint_required;
 		}
 
 		if (*val != '-') {
@@ -431,7 +442,7 @@ int bch2_opt_parse(struct bch_fs *c,
 		if (!val) {
 			prt_printf(err, "%s: required value",
 				   opt->attr.name);
-			return -EINVAL;
+			return -BCH_ERR_EINVAL_opt_parse_str_required;
 		}
 
 		ret = match_string(opt->choices, -1, val);
@@ -681,7 +692,8 @@ void bch2_opt_hook_post_set(struct bch_fs *c, struct bch_dev *ca, u64 inum,
 
 int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
 			     struct printbuf *parse_later,
-			     const char *name, const char *val)
+			     const char *name, const char *val,
+			     struct printbuf *err)
 {
 	u64 v;
 	int ret, id;
@@ -715,8 +727,7 @@ int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
 	    !IS_ENABLED(CONFIG_BCACHEFS_QUOTA))
 		return -BCH_ERR_option_name;
 
-	CLASS(printbuf, err)();
-	ret = bch2_opt_parse(c, &bch2_opt_table[id], val, &v, &err);
+	ret = bch2_opt_parse(c, &bch2_opt_table[id], val, &v, err);
 	if (ret == -BCH_ERR_option_needs_open_fs) {
 		if (parse_later) {
 			prt_printf(parse_later, "%s=%s,", name, val);
@@ -728,7 +739,7 @@ int bch2_parse_one_mount_opt(struct bch_fs *c, struct bch_opts *opts,
 	}
 
 	if (ret < 0)
-		return -BCH_ERR_option_value;
+		return ret;
 
 	if (bch2_opt_table[id].flags & OPT_MOUNT_OLD) {
 		pr_err("option %s may no longer be specified at mount time; set via sysfs opts dir",
@@ -746,10 +757,6 @@ int bch2_parse_mount_opts(struct bch_fs *c, struct bch_opts *opts,
 			  struct printbuf *parse_later, char *options,
 			  bool ignore_unknown)
 {
-	char *copied_opts, *copied_opts_start;
-	char *opt, *name, *val;
-	int ret = 0;
-
 	if (!options)
 		return 0;
 
@@ -760,28 +767,31 @@ int bch2_parse_mount_opts(struct bch_fs *c, struct bch_opts *opts,
 	if (*options == ',')
 		options++;
 
-	copied_opts = kstrdup(options, GFP_KERNEL);
+	char *copied_opts __free(kfree) = kstrdup(options, GFP_KERNEL);
 	if (!copied_opts)
 		return -ENOMEM;
-	copied_opts_start = copied_opts;
 
-	while ((opt = strsep(&copied_opts, ",")) != NULL) {
+	char *optstr = copied_opts;
+	char *opt, *name, *val;
+	int ret = 0;
+
+	while ((opt = strsep(&optstr, ",")) != NULL) {
 		if (!*opt)
 			continue;
 
 		name	= strsep(&opt, "=");
 		val	= opt;
 
-		ret = bch2_parse_one_mount_opt(c, opts, parse_later, name, val);
+		CLASS(printbuf, err)();
+		ret = bch2_parse_one_mount_opt(c, opts, parse_later, name, val, &err);
 		if (ret == -BCH_ERR_option_name && ignore_unknown)
 			ret = 0;
 		if (ret) {
-			pr_err("Error parsing option %s: %s", name, bch2_err_str(ret));
+			pr_err("Error parsing option %s", err.buf);
 			break;
 		}
 	}
 
-	kfree(copied_opts_start);
 	return ret;
 }
 
@@ -791,7 +801,14 @@ u64 bch2_opt_from_sb(struct bch_sb *sb, enum bch_opt_id id, int dev_idx)
 	u64 v;
 
 	if (dev_idx < 0) {
-		v = opt->get_sb(sb);
+		if (opt->get_sb) {
+			v = opt->get_sb(sb);
+		} else if (opt->get_ext) {
+			const struct bch_sb_field_ext *ext = bch2_sb_field_get(sb, ext);
+			v = ext ? opt->get_ext(ext) : 0;
+		} else {
+			v = 0;
+		}
 	} else {
 		if (WARN(!bch2_member_exists(sb, dev_idx),
 			 "tried to set device option %s on nonexistent device %i",
@@ -823,7 +840,7 @@ int bch2_opts_from_sb(struct bch_opts *opts, struct bch_sb *sb)
 	for (unsigned id = 0; id < bch2_opts_nr; id++) {
 		const struct bch_option *opt = bch2_opt_table + id;
 
-		if (opt->get_sb)
+		if (opt->get_sb || opt->get_ext)
 			bch2_opt_set_by_id(opts, id, bch2_opt_from_sb(sb, id, -1));
 	}
 
@@ -844,10 +861,15 @@ bool __bch2_opt_set_sb(struct bch_sb *sb, int dev_idx,
 	if (opt->flags & OPT_SB_FIELD_ONE_BIAS)
 		v++;
 
-	if ((opt->flags & OPT_FS) && opt->set_sb && dev_idx < 0) {
-		changed = v != opt->get_sb(sb);
-
-		opt->set_sb(sb, v);
+	if ((opt->flags & OPT_FS) && dev_idx < 0) {
+		if (opt->set_sb) {
+			changed = v != opt->get_sb(sb);
+			opt->set_sb(sb, v);
+		} else if (opt->set_ext) {
+			struct bch_sb_field_ext *ext = bch2_sb_field_get(sb, ext);
+			changed = v != opt->get_ext(ext);
+			opt->set_ext(ext, v);
+		}
 	}
 
 	if ((opt->flags & OPT_DEVICE) && opt->set_member && dev_idx >= 0) {

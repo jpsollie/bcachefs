@@ -41,6 +41,8 @@ enum bch_fsck_flags {
 	x(journal_entry_dev_usage_bad_size,			 27,	0)		\
 	x(journal_entry_dev_usage_bad_dev,			 28,	0)		\
 	x(journal_entry_dev_usage_bad_pad,			 29,	0)		\
+	x(journal_entry_rewind_limit_bad_size,			355,	0)		\
+	x(journal_entry_rewind_bad_size,			356,	0)		\
 	x(btree_node_unreadable,				 30,	0)		\
 	x(btree_node_fault_injected,				 31,	0)		\
 	x(btree_node_bad_magic,					 32,	0)		\
@@ -140,7 +142,7 @@ enum bch_fsck_flags {
 	x(bucket_gens_to_invalid_dev,				120,	FSCK_AUTOFIX)	\
 	x(bucket_gens_to_invalid_buckets,			121,	FSCK_AUTOFIX)	\
 	x(bucket_gens_nonzero_for_invalid_buckets,		122,	FSCK_AUTOFIX)	\
-	x(need_discard_freespace_key_to_invalid_dev_bucket,	123,	0)		\
+	x(need_discard_freespace_key_to_invalid_dev_bucket,	123,	FSCK_AUTOFIX)	\
 	x(need_discard_freespace_key_bad,			124,	FSCK_AUTOFIX)	\
 	x(discarding_bucket_not_in_need_discard_btree,		291,	0)		\
 	x(backpointer_bucket_offset_wrong,			125,	0)		\
@@ -203,9 +205,11 @@ enum bch_fsck_flags {
 	x(stripe_csum_granularity_bad,				290,	0)		\
 	x(stripe_sectors_zero,					340,	0)		\
 	x(stripe_sector_count_wrong,				169,	0)		\
+	x(stripe_parity_block_sector_count_wrong,		360,	0)		\
 	x(stripe_to_missing_bucket_ref,				346,	FSCK_AUTOFIX)	\
 	x(bucket_stripe_ref_to_missing_stripe,			347,	FSCK_AUTOFIX)	\
 	x(bucket_stripe_ref_to_incorrect_stripe,		348,	FSCK_AUTOFIX)	\
+	x(stripe_update_stale_stripe_ptr,			354,	FSCK_AUTOFIX)	\
 	x(snapshot_tree_pos_bad,				170,	0)		\
 	x(snapshot_tree_to_missing_snapshot,			171,	0)		\
 	x(snapshot_tree_to_missing_subvol,			172,	0)		\
@@ -365,7 +369,9 @@ enum bch_fsck_flags {
 	x(vfs_i_size_bad,					343,	0)		\
 	x(vfs_i_sectors_bad,					344,	0)		\
 	x(vfs_unlink_got_wrong_inum,				349,	0)		\
-	x(MAX,							354,	0)
+	x(device_bad_flush,					357,	0)		\
+	x(journal_bucket_seq_not_monotonic,			358,	0)		\
+	x(MAX,							359,	0)
 
 enum bch_sb_error_id {
 #define x(t, n, ...) BCH_FSCK_ERR_##t = n,

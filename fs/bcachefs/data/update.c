@@ -16,6 +16,8 @@
 #include "data/move.h"
 #include "data/nocow_locking.h"
 #include "data/reconcile/trigger.h"
+#include "data/ec/create.h"
+#include "data/reconcile/work.h"
 #include "data/update.h"
 #include "data/write.h"
 
@@ -104,9 +106,9 @@ static unsigned ptr_remap(struct bch_fs *c, struct bkey_s_c old,
 	return 0;
 }
 
-static unsigned ptr_mask_remap(struct bch_fs *c,
-			       struct bkey_s_c old, unsigned oldmask,
-			       struct bkey_s_c new)
+unsigned ptr_mask_remap(struct bch_fs *c,
+		       struct bkey_s_c old, unsigned oldmask,
+		       struct bkey_s_c new)
 {
 	if (!oldmask)
 		return 0;
@@ -145,6 +147,18 @@ static unsigned bkey_ptr_conflicts_mask(struct bch_fs *c, struct bkey_s_c k1, st
 
 	bkey_for_each_ptr(bch2_bkey_ptrs_c(k2), ptr)
 		ptrs_conflict |= bkey_has_device_mask(c, k1, ptr->dev);
+	return ptrs_conflict;
+}
+
+/* Same, but skip cached pointers in k2 — a durable write doesn't conflict
+ * with a cached pointer on the same device */
+static unsigned bkey_ptr_noncached_conflicts_mask(struct bch_fs *c, struct bkey_s_c k1, struct bkey_s_c k2)
+{
+	unsigned ptrs_conflict = 0;
+
+	bkey_for_each_ptr(bch2_bkey_ptrs_c(k2), ptr)
+		if (!ptr->cached)
+			ptrs_conflict |= bkey_has_device_mask(c, k1, ptr->dev);
 	return ptrs_conflict;
 }
 
@@ -279,9 +293,12 @@ static int data_update_index_update_key(struct btree_trans *trans,
 
 
 		/* Any conflicts that are left over were useless writes -
-		 * perhaps due to a copygc race:
+		 * perhaps due to a copygc race.
+		 *
+		 * But a new durable pointer doesn't conflict with a cached
+		 * pointer on the same device — it replaces it:
 		 */
-		ptrs_conflict = bkey_ptr_conflicts_mask(c, bkey_i_to_s_c(&new->k_i), bkey_i_to_s_c(insert));
+		ptrs_conflict = bkey_ptr_noncached_conflicts_mask(c, bkey_i_to_s_c(&new->k_i), bkey_i_to_s_c(insert));
 		if (ptrs_conflict) {
 			event_add_trace(c, data_update_useless_write_fail,
 					k.k->size * hweight32(ptrs_conflict), buf, ({
@@ -302,23 +319,22 @@ static int data_update_index_update_key(struct btree_trans *trans,
 				return 0;
 			}
 		}
-	} else {
-		/*
-		 * Drop all conflicts from the existing extent, not the newly
-		 * written replicas:
-		 *
-		 * When converting an extent to erasure coding, we don't
-		 * disallow the write from allocating on the extent's existing
-		 * devices: we just want a new replica that will have a stripe
-		 * pointer added asynchronously by erasure coding, and it can
-		 * overwrite whichever device it happens to land on
-		 *
-		 * XXX: make sure drop_extra_replicas does not drop the new
-		 * replica
-		 */
-		unsigned ptrs_conflict = bkey_ptr_conflicts_mask(c, bkey_i_to_s_c(insert), bkey_i_to_s_c(&new->k_i));
-		bch2_bkey_drop_ptrs_mask(c, insert, ptrs_conflict);
 	}
+
+	/*
+	 * Drop all conflicts from the existing extent, not the newly written
+	 * replicas:
+	 *
+	 * When converting an extent to erasure coding, we don't disallow the
+	 * write from allocating on the extent's existing devices: we just want
+	 * a new replica that will have a stripe pointer added asynchronously by
+	 * erasure coding, and it can overwrite whichever device it happens to
+	 * land on
+	 *
+	 * XXX: make sure drop_extra_replicas does not drop the new replica
+	 */
+	unsigned ptrs_conflict = bkey_ptr_conflicts_mask(c, bkey_i_to_s_c(insert), bkey_i_to_s_c(&new->k_i));
+	bch2_bkey_drop_ptrs_mask(c, insert, ptrs_conflict);
 
 	/* Now, merge newly written replicas:
 	 * Since these are appended to the end of @insert, they don't invalidate
@@ -568,6 +584,42 @@ static int data_update_index_update_nowrite(struct btree_trans *trans,
 	}));
 }
 
+/*
+ * EC allocation failed — the write never happened, but the extent
+ * still needs erasure coding. Mark it pending so reconcile retries
+ * from the pending list instead of the main scan.
+ */
+static int __data_update_ec_alloc_failed(struct btree_trans *trans,
+					 struct data_update *u)
+{
+	struct bch_fs *c = trans->c;
+	struct bkey_s_c old = bkey_i_to_s_c(u->k.k);
+
+	return for_each_btree_key_commit(trans, iter, u->btree_id,
+			bkey_start_pos(old.k),
+			BTREE_ITER_slots|BTREE_ITER_intent,
+			k, NULL, NULL,
+			BCH_TRANS_COMMIT_no_check_rw|
+			BCH_TRANS_COMMIT_no_enospc, ({
+		if (bkey_le(old.k->p, bkey_start_pos(k.k)))
+			break;
+
+		if (!bch2_extents_match(c, k, old))
+			continue;
+
+		bch2_extent_reconcile_pending_mod(trans, &iter, 0, k, true);
+	}));
+}
+
+void bch2_data_update_ec_alloc_failed(struct data_update *u)
+{
+	struct bch_fs *c = u->op.c;
+	CLASS(btree_trans, trans)(c);
+	int ret = __data_update_ec_alloc_failed(trans, u);
+	if (ret)
+		bch_err_fn(c, ret);
+}
+
 void bch2_data_update_read_done(struct data_update *u)
 {
 	struct bch_fs *c = u->op.c;
@@ -591,6 +643,21 @@ void bch2_data_update_read_done(struct data_update *u)
 
 	if (unlikely(rbio->ret)) {
 		u->op.error = rbio->ret;
+		u->op.end_io(&u->op);
+		return;
+	}
+
+	if (u->opts.type == BCH_DATA_UPDATE_scrub_no_repair) {
+		if (u->opts.ptrs_io_error) {
+			scrub_journal_repair r = {
+				.btree_id	= u->btree_id,
+				.bad_devs	= u->opts.ptrs_io_error,
+			};
+			bkey_copy(&r.k, u->k.k);
+			mutex_lock(&c->scrub_journal_repairs_lock);
+			darray_push(&c->scrub_journal_repairs, r);
+			mutex_unlock(&c->scrub_journal_repairs_lock);
+		}
 		u->op.end_io(&u->op);
 		return;
 	}
@@ -921,7 +988,7 @@ static unsigned durability_available_on_target(struct bch_fs *c,
 					       bool *need_copygc)
 {
 	if (trace) {
-		prt_str(trace, "available to write on ");
+		prt_str(trace, "available to write on target=");
 		bch2_target_to_text(trace, c, target);
 		prt_newline(trace);
 		printbuf_indent_add(trace, 2);
@@ -952,7 +1019,8 @@ static unsigned durability_available_on_target(struct bch_fs *c,
 		}
 
 		if (trace)
-			prt_printf(trace, "%s: %llu\n", ca->name, free);
+			prt_printf(trace, "%s: durability %u free %llu \n",
+				   ca->name, ca->mi.durability, free);
 	}
 
 	if (trace) {
@@ -1085,7 +1153,7 @@ int bch2_can_do_data_update(struct btree_trans *trans,
 				return d;
 
 			durability_keeping += d;
-			if (!data_opts->no_devs_have)
+			if (!data_opts->no_devs_have && !p.ptr.cached)
 				devs_have.data[devs_have.nr++] = p.ptr.dev;
 		}
 
@@ -1100,7 +1168,29 @@ int bch2_can_do_data_update(struct btree_trans *trans,
 	if (trace)
 		prt_printf(trace, "need %u replicas\n", opts->data_replicas - durability_keeping);
 
-	return __bch2_can_do_write(c, opts, data_opts, &devs_have, k, trace);
+	int ret = __bch2_can_do_write(c, opts, data_opts, &devs_have, k, trace);
+	if (ret)
+		return ret;
+
+	/*
+	 * Check if EC stripe creation is feasible — avoid expensive data
+	 * reads when EC will inevitably fail (not enough devices, etc.)
+	 */
+	if (data_opts->write_flags & BCH_WRITE_must_ec) {
+		struct alloc_request req = {
+			.target		= data_opts->target,
+			.ec_replicas	= opts->data_replicas + data_opts->extra_replicas,
+			.watermark	= BCH_WATERMARK_normal,
+		};
+
+		struct ec_stripe_head *h =
+			bch2_ec_stripe_head_get(trans, &req, 0);
+		if (IS_ERR_OR_NULL(h))
+			return bch_err_throw(c, ec_alloc_failed);
+		bch2_ec_stripe_head_put(c, h);
+	}
+
+	return 0;
 }
 
 /*
@@ -1131,13 +1221,14 @@ static void checksummed_and_non_checksummed_handling(struct data_update *u, stru
 		return;
 
 	bool rewrite_found = false;
-	unsigned ptr_bit = 1;
 
-	bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
-		if (ptr_bit & u->opts.ptrs_kill) {
+	unsigned ptr_bit = 1;
+	bkey_for_each_ptr(ptrs, ptr) {
+		if ((ptr_bit & u->opts.ptrs_kill) &&
+		    !ptr->cached) {
 			if (!rewrite_found) {
 				rewrite_found = true;
-				u->opts.read_dev = p.ptr.dev;
+				u->opts.read_dev = ptr->dev;
 			} else {
 				u->opts.ptrs_kill &= ~ptr_bit;
 			}
@@ -1188,7 +1279,8 @@ int bch2_data_update_init(struct btree_trans *trans,
 	m->op.watermark		= max(m->opts.commit_flags & BCH_WATERMARK_MASK,
 				      BCH_WATERMARK_normal);
 
-	if (k.k->p.snapshot &&
+	if (m->opts.type != BCH_DATA_UPDATE_scrub_no_repair &&
+	    k.k->p.snapshot &&
 	    unlikely(ret = bch2_check_key_has_snapshot(trans, iter, k))) {
 		if (ret > 0) /* key was deleted */
 			ret = bch2_trans_commit(trans, NULL, NULL, BCH_TRANS_COMMIT_no_enospc) ?:
@@ -1228,7 +1320,7 @@ int bch2_data_update_init(struct btree_trans *trans,
 			}
 
 			durability_keeping += d;
-			if (!m->opts.no_devs_have)
+			if (!m->opts.no_devs_have && !p.ptr.cached)
 				bch2_dev_list_add_dev(&m->op.devs_have, p.ptr.dev);
 		}
 
@@ -1251,7 +1343,8 @@ int bch2_data_update_init(struct btree_trans *trans,
 		ptr_bit <<= 1;
 	}
 
-	if (m->opts.type != BCH_DATA_UPDATE_scrub) {
+	if (m->opts.type != BCH_DATA_UPDATE_scrub &&
+	    m->opts.type != BCH_DATA_UPDATE_scrub_no_repair) {
 		/*
 		 * If current extent durability is less than io_opts.data_replicas,
 		 * we're not trying to rereplicate the extent up to data_alloc/replicas.here -

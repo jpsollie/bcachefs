@@ -19,6 +19,7 @@
 #include "init/chardev.h"
 #include "init/fs.h"
 
+#include "vfs/direct.h"
 #include "vfs/fs.h"
 #include "vfs/ioctl.h"
 
@@ -164,7 +165,7 @@ static int bch2_ioc_setlabel(struct bch_fs *c,
 		bch_err(c,
 			"unable to set label with more than %d bytes",
 			BCH_SB_LABEL_SIZE - 1);
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_setlabel_too_long);
 	}
 
 	try(mnt_want_write_file(file));
@@ -209,7 +210,7 @@ static int bch2_ioc_goingdown(struct bch_fs *c, u32 __user *arg)
 		bch2_fs_emergency_read_only(c, &msg.m);
 		return 0;
 	default:
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_goingdown_bad_flags);
 	}
 }
 
@@ -231,14 +232,14 @@ static long __bch2_ioctl_subvolume_create(struct bch_fs *c, struct file *filp,
 	if (arg.flags & ~(BCH_SUBVOL_SNAPSHOT_CREATE|
 			  BCH_SUBVOL_SNAPSHOT_RO)) {
 		prt_str(err, "invalid flasg");
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_subvol_create_bad_flags);
 	}
 
 	if (!(arg.flags & BCH_SUBVOL_SNAPSHOT_CREATE) &&
 	    (arg.src_ptr ||
 	     (arg.flags & BCH_SUBVOL_SNAPSHOT_RO))) {
 		prt_str(err, "invalid flasg");
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_subvol_create_flags_mismatch);
 	}
 
 	if (arg.flags & BCH_SUBVOL_SNAPSHOT_CREATE)
@@ -374,7 +375,7 @@ static long __bch2_ioctl_subvolume_destroy(struct bch_fs *c, struct file *filp,
 	int ret = 0;
 
 	if (arg.flags)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_subvol_destroy_bad_flags);
 
 	victim = start_removing_user_path_at(arg.dirfd, name, &path);
 	if (IS_ERR(victim))
@@ -586,7 +587,7 @@ static long bch2_ioctl_subvolume_list(struct bch_fs *c, struct file *filp,
 	try(copy_from_user_errcode(&arg, user_arg, sizeof(arg)));
 
 	if (arg.pad)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_subvol_readdir_pad);
 
 	u32 parent = inode_inum(file_bch_inode(filp)).subvol;
 	struct mnt_idmap *idmap = file_mnt_idmap(filp);
@@ -629,7 +630,7 @@ static long bch2_ioctl_subvolume_to_path(struct bch_fs *c, struct file *filp,
 	try(copy_from_user_errcode(&arg, user_arg, sizeof(arg)));
 
 	if (!arg.buf_size)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_subvol_to_path_no_buf);
 
 	CLASS(btree_trans, trans)(c);
 	CLASS(printbuf, path)();
@@ -687,7 +688,7 @@ static long bch2_ioctl_snapshot_tree(struct bch_fs *c, struct file *filp,
 	try(copy_from_user_errcode(&arg, user_arg, sizeof(arg)));
 
 	if (arg.pad)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_snapshot_tree_query_pad);
 
 	/* Querying a specific tree by ID requires CAP_SYS_ADMIN */
 	if (arg.tree_id && !capable(CAP_SYS_ADMIN))
@@ -865,6 +866,124 @@ static long bch2_ioc_propagate_reflink_p_opts(struct bch_fs *c,
 	}));
 }
 
+static long bch2_ioc_pread_raw(struct file *file,
+			       struct bch_inode_info *inode,
+			       struct bch_ioctl_pread_raw __user *uarg)
+{
+	struct bch_ioctl_pread_raw arg;
+
+	if (copy_from_user(&arg, uarg, sizeof(arg)))
+		return -EFAULT;
+	if (arg.flags & ~BCH_PREAD_RAW_no_poison_check)
+		return -EINVAL;
+	if (arg.err.pad)
+		return -EINVAL;
+	if (!arg.len)
+		return 0;
+	if (!(file->f_flags & O_DIRECT))
+		return -EINVAL;
+	if (!inode_owner_or_capable(file_mnt_idmap(file), &inode->v))
+		return -EPERM;
+
+	loff_t pos = arg.offset;
+	int ret = rw_verify_area(READ, file, &pos, arg.len);
+	if (ret)
+		return ret;
+
+	struct iov_iter iter;
+	import_ubuf(ITER_DEST, (void __user *)(unsigned long)arg.buf, arg.len, &iter);
+
+	struct kiocb kiocb;
+	init_sync_kiocb(&kiocb, file);
+	kiocb.ki_pos = arg.offset;
+
+	enum bch_read_flags read_flags = 0;
+	if (arg.flags & BCH_PREAD_RAW_no_poison_check)
+		read_flags |= BCH_READ_no_poison_check;
+
+	struct bch_read_err_report err_report;
+	mutex_init(&err_report.lock);
+	err_report.errors = 0;
+	err_report.msg = (struct printbuf) PRINTBUF;
+
+	ret = bch2_direct_IO_read(&kiocb, &iter, read_flags, &err_report);
+
+	if (copy_to_user(&uarg->errors, &err_report.errors, sizeof(err_report.errors)))
+		ret = -EFAULT;
+
+	int err = bch2_copy_ioctl_err_msg(&arg.err, &err_report.msg, ret < 0 ? ret : 0);
+	if (err && !ret)
+		ret = err;
+
+	printbuf_exit(&err_report.msg);
+	return ret;
+}
+
+static int bch2_unpoison_extent(struct btree_trans *trans, struct btree_iter *iter,
+			       struct bkey_s_c k)
+{
+	u64 flags = bch2_bkey_extent_flags(k);
+	if (!(flags & BIT_ULL(BCH_EXTENT_FLAG_poisoned)))
+		return 0;
+
+	struct bkey_i *new = errptr_try(bch2_trans_kmalloc(trans,
+					bkey_bytes(k.k) + sizeof(struct bch_extent_flags)));
+
+	bkey_reassemble(new, k);
+	try(bch2_bkey_extent_flags_set(trans->c, new,
+				       flags & ~BIT_ULL(BCH_EXTENT_FLAG_poisoned)));
+	try(bch2_trans_update(trans, iter, new, 0));
+	return 0;
+}
+
+static int bch2_unpoison_reflink(struct btree_trans *trans,
+				 struct bkey_s_c_reflink_p p)
+{
+	u64 idx = REFLINK_P_IDX(p.v);
+	u64 end = idx + p.k->size;
+
+	struct bkey_s_c k;
+	int ret;
+	for_each_btree_key_norestart(trans, iter, BTREE_ID_reflink,
+			POS(0, idx), BTREE_ITER_intent, k, ret) {
+		if (bpos_ge(bkey_start_pos(k.k), POS(0, end)))
+			break;
+		try(bch2_unpoison_extent(trans, &iter, k));
+	}
+	return ret;
+}
+
+static long bch2_ioc_unpoison(struct bch_fs *c, struct file *file,
+			      struct bch_inode_info *inode,
+			      struct bch_ioctl_unpoison __user *uarg)
+{
+	struct bch_ioctl_unpoison arg;
+
+	if (copy_from_user(&arg, uarg, sizeof(arg)))
+		return -EFAULT;
+	if (arg.flags || arg.pad)
+		return -EINVAL;
+	if (!arg.len)
+		return 0;
+
+	if (!inode_owner_or_capable(file_mnt_idmap(file), &inode->v))
+		return -EPERM;
+
+	subvol_inum inum = inode_inum(inode);
+	struct bpos start = POS(inum.inum, arg.offset >> 9);
+	struct bpos end   = POS(inum.inum, (arg.offset + arg.len) >> 9);
+
+	CLASS(btree_trans, trans)(c);
+
+	return for_each_btree_key_in_subvolume_max(trans, iter, BTREE_ID_extents,
+			start, end, inum.subvol, BTREE_ITER_intent, k, ({
+		(k.k->type == KEY_TYPE_reflink_p
+			? bch2_unpoison_reflink(trans, bkey_s_c_to_reflink_p(k))
+			: bch2_unpoison_extent(trans, &iter, k)) ?:
+		bch2_trans_commit(trans, NULL, NULL, 0);
+	}));
+}
+
 long bch2_fs_file_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
 	struct bch_inode_info *inode = file_bch_inode(file);
@@ -954,6 +1073,16 @@ long bch2_fs_file_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 	case BCH_IOCTL_SNAPSHOT_TREE:
 		ret = bch2_ioctl_snapshot_tree(c, file,
 				(struct bch_ioctl_snapshot_tree_query __user *) arg);
+		break;
+
+	case BCHFS_IOC_PREAD_RAW:
+		ret = bch2_ioc_pread_raw(file, inode,
+				(struct bch_ioctl_pread_raw __user *) arg);
+		break;
+
+	case BCHFS_IOC_UNPOISON:
+		ret = bch2_ioc_unpoison(c, file, inode,
+				(struct bch_ioctl_unpoison __user *) arg);
 		break;
 
 	default:

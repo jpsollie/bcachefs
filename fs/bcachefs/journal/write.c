@@ -314,6 +314,7 @@ static CLOSURE_CALLBACK(journal_write_done)
 
 			/* replicas refs need to be put first */
 			j->flushed_seq_ondisk = seq;
+			j->rewind_seq_ondisk = j->rewind_seq;
 		}
 
 		if (w->empty)
@@ -376,7 +377,7 @@ static CLOSURE_CALLBACK(journal_write_done)
 	if (last_seq_ondisk_updated) {
 		bch2_reset_alloc_cursors(c);
 		closure_wake_up(&c->allocator.freelist_wait);
-		bch2_do_discards(c);
+		bch2_do_discards_async(c);
 	}
 
 	closure_put(&c->cl);
@@ -605,7 +606,7 @@ static int bch2_journal_write_prep(struct journal *j, struct journal_buf *w)
 		bch2_fs_fatal_error(c, ": journal write overran available space, %zu > %u (extra %u reserved %u/%u)",
 				    vstruct_bytes(jset), w->sectors << 9,
 				    u64s, w->u64s_reserved, j->entry_u64s_reserved);
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_journal_write_overran_available_space);
 	}
 
 	return 0;
@@ -623,6 +624,7 @@ static int bch2_journal_write_checksum(struct journal *j, struct journal_buf *w)
 
 	SET_JSET_BIG_ENDIAN(jset, CPU_BIG_ENDIAN);
 	SET_JSET_CSUM_TYPE(jset, bch2_meta_checksum_type(c));
+	SET_JSET_HAS_OVERWRITES(jset, w->has_overwrites);
 
 	if (bch2_csum_type_is_encryption(JSET_CSUM_TYPE(jset)))
 		validate_before_checksum = true;
@@ -690,10 +692,25 @@ static int bch2_journal_write_pick_flush(struct journal *j, struct journal_buf *
 
 		j->nr_noflush_writes++;
 	} else {
+		struct jset *jset = w->data;
+
 		w->must_flush = true;
 		j->last_flush_write = jiffies;
 		j->nr_flush_writes++;
 		clear_bit(JOURNAL_need_flush_write, &j->flags);
+
+		if (!c->opts.journal_rewind_discard_buffer_percent)
+			j->rewind_seq = le64_to_cpu(jset->seq) + 1;
+
+		struct jset_entry *end = vstruct_last(jset);
+		struct jset_entry_rewind_limit *r =
+			container_of(jset_entry_init(&end, sizeof(*r)),
+				     struct jset_entry_rewind_limit, entry);
+		r->entry.type	= BCH_JSET_ENTRY_rewind_limit;
+		r->seq		= cpu_to_le64(min(j->rewind_seq,
+						  le64_to_cpu(jset->seq) + 1));
+		le32_add_cpu(&jset->u64s,
+			     sizeof(*r) / sizeof(u64));
 	}
 
 	return 0;

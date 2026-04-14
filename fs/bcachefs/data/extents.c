@@ -58,27 +58,34 @@ void bch2_io_failures_to_text(struct printbuf *out,
 			      struct bch_fs *c,
 			      struct bch_io_failures *failed)
 {
-	darray_for_each(*failed, f) {
-		bch2_printbuf_make_room(out, 1024);
-		scoped_guard(rcu) {
-			guard(printbuf_atomic)(out);
-			struct bch_dev *ca = bch2_dev_rcu_noerror(c, f->dev);
-			if (ca)
-				prt_str(out, ca->name);
-			else
-				prt_printf(out, "(invalid device %u)", f->dev);
+	scoped_guard(printbuf_indent, out)
+		darray_for_each(*failed, f) {
+			bch2_printbuf_make_room(out, 1024);
+			scoped_guard(rcu) {
+				guard(printbuf_atomic)(out);
+				struct bch_dev *ca = bch2_dev_rcu_noerror(c, f->dev);
+				if (ca)
+					prt_str(out, ca->name);
+				else
+					prt_printf(out, "(invalid device %u)", f->dev);
+			}
+
+			if (!f->csum_nr && !f->ec_errcode && !f->errcode)
+				prt_str(out, " no error - confused");
+
+			if (f->csum_nr)
+				prt_printf(out, " checksum (%u)", f->csum_nr);
+			if (f->errcode)
+				prt_printf(out, " io: %s", bch2_err_str(f->errcode));
+			if (f->ec_errcode)
+				prt_printf(out, " ec reconstruct: %s", bch2_err_str(f->ec_errcode));
+			prt_newline(out);
 		}
 
-		if (!f->csum_nr && !f->ec_errcode && !f->errcode)
-			prt_str(out, " no error - confused");
-
-		if (f->csum_nr)
-			prt_printf(out, " checksum (%u)", f->csum_nr);
-		if (f->errcode)
-			prt_printf(out, " %s", bch2_err_str(f->errcode));
-		prt_newline(out);
-		if (f->ec_errcode)
-			prt_printf(out, "  ec reconstruct %s\n", bch2_err_str(f->ec_errcode));
+	if (failed->ec_msg.pos) {
+		prt_printf(out, "ec reconstruct:\n");
+		guard(printbuf_indent)(out);
+		prt_str(out, failed->ec_msg.buf);
 	}
 }
 
@@ -1315,6 +1322,17 @@ static bool drop_cached_pointer_trace(struct bch_fs *c, struct bkey_s k,
 	return true;
 }
 
+static bool ptr_has_ec(struct bch_fs *c, struct bkey_s k, struct bch_extent_ptr *ptr)
+{
+	struct extent_ptr_decoded p;
+	union bch_extent_entry *entry;
+
+	bkey_for_each_ptr_decode(k.k, bch2_bkey_ptrs(k), p, entry)
+		if (&entry->ptr == ptr)
+			return p.has_ec;
+	return false;
+}
+
 static bool maybe_drop_cached_ptr(struct bch_fs *c, struct bch_inode_opts *opts,
 				  struct bkey_s k,
 				  struct bch_extent_ptr *ptr, bool have_cached_ptr)
@@ -1322,6 +1340,9 @@ static bool maybe_drop_cached_ptr(struct bch_fs *c, struct bch_inode_opts *opts,
 	if (ptr->cached) {
 		if (have_cached_ptr)
 			return drop_cached_pointer_trace(c, k, ptr, "extent already has another cached pointer");
+
+		if (ptr_has_ec(c, k, ptr))
+			return drop_cached_pointer_trace(c, k, ptr, "cached ptr incompatible with erasure coding");
 
 		struct bch_dev *ca = bch2_dev_rcu_noerror(c, ptr->dev);
 		if (ca && dev_ptr_stale_rcu(ca, ptr))
@@ -1776,10 +1797,12 @@ int bch2_bkey_ptrs_validate(struct bch_fs *c, struct bkey_s_c k,
 					 c, ptr_cached_and_erasure_coded,
 					 "cached, erasure coded ptr");
 
-			if (!entry->ptr.unwritten)
-				have_written = true;
-			else
-				have_unwritten = true;
+			if (entry->ptr.dev != BCH_SB_MEMBER_INVALID) {
+				if (!entry->ptr.unwritten)
+					have_written = true;
+				else
+					have_unwritten = true;
+			}
 
 			if (entry->ptr.dev != BCH_SB_MEMBER_INVALID || have_ec) {
 				if (!entry->ptr.cached)

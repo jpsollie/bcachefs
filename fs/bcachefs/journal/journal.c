@@ -23,6 +23,116 @@
 
 #include "util/enumerated_ref.h"
 
+/* DOC_LATEX(journal)
+ * The journal is a write-ahead log for metadata. Instead of writing every
+ * \hyperref[sec:btrees]{btree} update directly to its btree node on disk,
+ * bcachefs records updates in the journal first. This allows metadata writes to be batched and sequential,
+ * dramatically improving performance.
+ *
+ * \subsubsection{How the journal works}
+ *
+ * Each journal entry (\texttt{struct jset}) contains a list of typed sub-entries:
+ * btree key updates, btree root pointers, timestamps, IO clock values, and
+ * diagnostic messages. Entries are assigned monotonically increasing sequence
+ * numbers that survive crashes and are never reused.
+ *
+ * The journal is stored as a ring buffer of buckets on each device. As new
+ * entries are written, they advance through the ring. Old entries are reclaimed
+ * once all the btree nodes they refer to have been flushed to disk.
+ *
+ * \subsubsection{Journal pins and reclaim}
+ *
+ * A \emph{journal pin} holds a reference from a dirty btree node (or key cache
+ * entry) to the journal sequence that contains its latest update. Journal space
+ * for a sequence cannot be reclaimed until all pins referencing that sequence
+ * are released---which happens when the corresponding btree node is written to
+ * disk.
+ *
+ * The journal reclaim thread runs in the background, identifying which btree
+ * nodes are pinning the oldest journal sequences and flushing them. Under normal
+ * operation this is invisible; under heavy write load, reclaim may need to work
+ * harder to keep up.
+ *
+ * \subsubsection{Space pressure}
+ *
+ * When free journal space drops below 25\%, or the pin list fills to 75\%
+ * capacity, the journal enters a reclaim watermark state. In this state:
+ *
+ * \begin{itemize}
+ * \item New metadata writes may be throttled
+ * \item The reclaim thread is woken to aggressively flush btree nodes
+ * \item Space is typically freed within milliseconds as nodes flush
+ * \end{itemize}
+ *
+ * If the journal fills completely, metadata operations block until space is
+ * freed. This is rare under normal workloads and resolves automatically. A
+ * sustained ``journal full'' condition typically indicates that btree node
+ * writes are bottlenecked---often by a slow device or high IO contention.
+ *
+ * \subsubsection{Flush and ordering}
+ *
+ * Journal writes come in two flavors:
+ *
+ * \begin{description}
+ * \item[Flush writes] Ordered to stable storage with disk cache flushes. These
+ *   provide durability guarantees---data acknowledged to applications via
+ *   \texttt{fsync()} is protected by flush writes. A configurable delay
+ *   (\texttt{journal\_flush\_delay}, default 1000\,ms) batches updates before
+ *   flushing.
+ * \item[No-flush writes] Written without ordering guarantees. These can be lost
+ *   on power failure but are much cheaper. Used between flush points to reduce
+ *   IO overhead.
+ * \end{description}
+ *
+ * On multi-device filesystems, flush writes issue a preflush to all devices
+ * first, ensuring all pending data writes are ordered before the journal entry.
+ *
+ * \subsubsection{Mount and recovery}
+ *
+ * On mount, the journal is read from all devices. The recovery window is
+ * determined by two sequence numbers: \texttt{last\_seq} (the oldest entry still
+ * needed) and the sequence of the last valid flush entry. All entries in this
+ * window are replayed in order, re-inserting their btree keys into the btree.
+ * Journal replay is idempotent---replaying the same entry twice is safe.
+ *
+ * On clean shutdown, a special \texttt{clean} field is written to the
+ * \hyperref[sec:superblock]{superblock} containing the btree roots and usage
+ * counters, allowing the next mount to skip journal replay entirely.
+ *
+ * \textbf{Sequence blacklisting}: After an unclean shutdown, some btree nodes on
+ * disk may reference journal sequences that were never durably committed. These
+ * sequences are added to a blacklist stored in the superblock; any btree node
+ * data referencing a blacklisted sequence is ignored during recovery. Once the
+ * affected nodes are rewritten with new sequences, the blacklist entries are
+ * garbage collected.
+ *
+ * \subsubsection{User-facing options}
+ *
+ * \begin{description}
+ * \item[\texttt{journal\_flush\_delay}] Milliseconds before auto-committing the
+ *   journal (default 1000). Lower values reduce the window of data loss on
+ *   crash; higher values improve throughput.
+ * \item[\texttt{journal\_flush\_disabled}] Disable journal flushes entirely.
+ *   \textbf{Dangerous}---data loss is expected on any unclean shutdown.
+ * \item[\texttt{journal\_reclaim\_delay}] Milliseconds before triggering
+ *   background reclaim (default 100).
+ * \item[\texttt{journal\_transaction\_names}] Log function names in journal
+ *   entries for debugging (default enabled).
+ * \end{description}
+ *
+ * Journal size is configured per device and can be resized online with
+ * \texttt{bcachefs device resize-journal}.
+ *
+ * \subsubsection{Consistency and self-healing}
+ *
+ * Every journal entry is checksummed. Entries that fail checksum validation are
+ * skipped during replay, with the filesystem falling back to the last known good
+ * entry. The sequence blacklist mechanism ensures that partially-written state
+ * from crashes cannot corrupt the btree. Journal entries are replicated across
+ * devices according to the \texttt{metadata\_replicas} setting; if one device's
+ * journal is unreadable, recovery proceeds from the other copies.
+ */
+
 static bool __journal_entry_is_open(union journal_res_state state)
 {
 	return state.cur_entry_offset < JOURNAL_ENTRY_CLOSED_VAL;
@@ -123,9 +233,11 @@ journal_error_check_stuck(struct journal *j, int error, unsigned flags)
 	CLASS(bch_log_msg, msg)(c);
 	msg.m.suppress = true; /* only print once, when we go ERO */
 
-	prt_printf(&msg.m, "Journal stuck! Hava a pre-reservation but journal full (error %s)",
+	prt_printf(&msg.m, "Journal stuck! Have a pre-reservation but journal full (error %s)",
 		   bch2_err_str(error));
 	bch2_journal_debug_to_text(&msg.m, j);
+	if (test_bit(JOURNAL_low_on_wb, &j->flags))
+		bch2_btree_write_buffer_to_text(&msg.m, c);
 
 	prt_printf(&msg.m, "Journal pins:\n");
 	bch2_journal_pins_to_text(&msg.m, j);
@@ -426,6 +538,7 @@ static int journal_entry_open(struct journal *j)
 	buf->write_allocated	= false;
 	buf->write_done		= false;
 	buf->empty		= false;
+	buf->has_overwrites	= READ_ONCE(c->opts.journal_transaction_names);
 
 	memset(buf->data, 0, sizeof(*buf->data));
 	buf->data->seq	= cpu_to_le64(journal_cur_seq(j));
@@ -679,6 +792,8 @@ int bch2_journal_res_get_slowpath(struct journal *j, struct journal_res *res,
 	CLASS(printbuf, buf)();
 	prt_printf(&buf, bch2_fmt(c, "Journal stuck? Waited for 10 seconds, err %s"), bch2_err_str(ret));
 	bch2_journal_debug_to_text(&buf, j);
+	if (test_bit(JOURNAL_low_on_wb, &j->flags))
+		bch2_btree_write_buffer_to_text(&buf, c);
 	bch2_print_str(c, KERN_ERR, buf.buf);
 
 	closure_wait_event(&j->async_wait,
@@ -733,7 +848,7 @@ void bch2_journal_entry_res_resize(struct journal *j,
  * necessary
  */
 int bch2_journal_flush_seq_async(struct journal *j, u64 seq,
-				 struct closure *parent)
+				 unsigned flags, struct closure *parent)
 {
 	struct bch_fs *c = container_of(j, struct bch_fs, journal);
 	struct journal_buf *buf;
@@ -778,7 +893,7 @@ recheck_need_open:
 		 * livelock:
 		 */
 		sched_annotate_sleep();
-		try(bch2_journal_res_get(j, &res, jset_u64s(0), 0, NULL));
+		try(bch2_journal_res_get(j, &res, jset_u64s(0), flags, NULL));
 
 		seq = res.seq;
 		buf = journal_seq_to_buf(j, seq);
@@ -836,7 +951,7 @@ int bch2_journal_flush_seq(struct journal *j, u64 seq, unsigned task_state)
 		return 0;
 
 	ret = wait_event_state(j->wait,
-			       (ret2 = bch2_journal_flush_seq_async(j, seq, NULL)),
+			       (ret2 = bch2_journal_flush_seq_async(j, seq, 0, NULL)),
 			       task_state);
 
 	if (!ret)
@@ -849,14 +964,46 @@ int bch2_journal_flush_seq(struct journal *j, u64 seq, unsigned task_state)
  * bch2_journal_flush_async - if there is an open journal entry, or a journal
  * still being written, write it and wait for the write to complete
  */
-void bch2_journal_flush_async(struct journal *j, struct closure *parent)
+void bch2_journal_flush_async(struct journal *j, unsigned flags, struct closure *parent)
 {
-	bch2_journal_flush_seq_async(j, atomic64_read(&j->seq), parent);
+	bch2_journal_flush_seq_async(j, atomic64_read(&j->seq), flags, parent);
 }
 
 int bch2_journal_flush(struct journal *j)
 {
 	return bch2_journal_flush_seq(j, atomic64_read(&j->seq), TASK_UNINTERRUPTIBLE);
+}
+
+/*
+ * Advance the rewind limit so that discards up to @seq become safe.
+ * Must be called before bch2_journal_flush() to persist the new limit.
+ */
+void bch2_journal_advance_rewind_seq(struct journal *j, u64 seq)
+{
+	scoped_guard(spinlock, &j->lock)
+		j->rewind_seq = max(j->rewind_seq, seq);
+}
+
+int bch2_journal_add_rewind_range(struct bch_fs *c, u64 from, u64 to)
+{
+	struct journal *j = &c->journal;
+
+	struct journal_rewind_range range = {
+		.from	= from,
+		.to	= to,
+	};
+	try(darray_push(&j->rewind_ranges, range));
+
+	unsigned u64s = 2;
+	try(darray_make_room(&j->early_journal_entries, jset_u64s(u64s)));
+	struct jset_entry_rewind *rw =
+		(void *) &darray_top(j->early_journal_entries);
+	journal_entry_init(&rw->entry, BCH_JSET_ENTRY_rewind, 0, 0, u64s);
+	rw->from	= cpu_to_le64(from);
+	rw->to		= cpu_to_le64(to);
+	j->early_journal_entries.nr += jset_u64s(u64s);
+
+	return 0;
 }
 
 /*
@@ -1069,6 +1216,8 @@ void __bch2_journal_debug_to_text(struct printbuf *out, struct journal *j)
 	prt_printf(out, "last_seq_ondisk:\t%llu\n",		j->last_seq_ondisk);
 	prt_printf(out, "flushed_seq_ondisk:\t%llu\n",		j->flushed_seq_ondisk);
 	prt_printf(out, "last_empty_seq:\t%llu\n",		j->last_empty_seq);
+	prt_printf(out, "rewind_seq:\t%llu\n",			j->rewind_seq);
+	prt_printf(out, "rewind_seq_ondisk:\t%llu\n",		j->rewind_seq_ondisk);
 	prt_printf(out, "watermark:\t%s\n",			bch2_watermarks[j->watermark]);
 	prt_printf(out, "each entry reserved:\t%u\n",		j->entry_u64s_reserved);
 	prt_printf(out, "nr flush writes:\t%llu\n",		j->nr_flush_writes);

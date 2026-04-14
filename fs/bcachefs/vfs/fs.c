@@ -4,6 +4,7 @@
 #include "bcachefs.h"
 
 #include "alloc/accounting.h"
+#include "alloc/background.h"
 #include "alloc/buckets.h"
 
 #include "btree/update.h"
@@ -932,7 +933,7 @@ static int bch2_rename2(struct mnt_idmap *idmap,
 	int ret;
 
 	if (flags & ~(RENAME_NOREPLACE|RENAME_EXCHANGE|RENAME_WHITEOUT))
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_rename_bad_flags);
 
 	if (mode == BCH_RENAME_OVERWRITE)
 		try(filemap_write_and_wait_range(src_inode->v.i_mapping, 0, LLONG_MAX));
@@ -1362,7 +1363,7 @@ static int fssetxattr_inode_update_fn(struct btree_trans *trans,
 	if (!S_ISREG(bi->bi_mode) &&
 	    !S_ISDIR(bi->bi_mode) &&
 	    (s->flags & (BCH_INODE_nodump|BCH_INODE_noatime)) != s->flags)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_setattr_bad_file_type);
 
 	if (s->set_casefold &&
 	    s->casefold != bch2_inode_casefold(c, bi))
@@ -1677,7 +1678,7 @@ static int bch2_get_name(struct dentry *parent, char *name, struct dentry *child
 	int ret;
 
 	if (!S_ISDIR(dir->v.i_mode))
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_get_name_not_dir);
 
 	CLASS(btree_trans, trans)(c);
 	CLASS(btree_iter, iter1)(trans, BTREE_ID_dirents,
@@ -1848,10 +1849,12 @@ static int bch2_vfs_write_inode(struct inode *vinode,
 	return bch2_err_class(ret);
 }
 
+#if 0
 static bool verify_i_size_at_evict;
 
 module_param_named(verify_i_size_at_evict, verify_i_size_at_evict, bool, 0644);
 MODULE_PARM_DESC(verify_i_size_at_evict, "");
+#endif
 
 static void bch2_evict_inode(struct inode *vinode)
 {
@@ -1871,7 +1874,17 @@ static void bch2_evict_inode(struct inode *vinode)
 
 	if (IS_ENABLED(CONFIG_BCACHEFS_DEBUG) && delete)
 		write_inode_now(&inode->v, true);
-
+	/*
+	 * Disabled: bch2_inode_find_by_inum() starts a new btree_trans, but
+	 * eviction can be called from inside an existing transaction — e.g.
+	 * discard_new_inode() from bch2_inode_hash_insert() during
+	 * bch2_lookup_trans(). The deadlock detector can't see locks held
+	 * by the outer transaction, so cycles involving both transactions
+	 * go undetected. Observed as a three-way deadlock between
+	 * btree_node_write_work, __bch2_unlink, and bch2_lookup (github
+	 * issue #1046).
+	 */
+#if 0
 	if (verify_i_size_at_evict) {
 		BUG_ON(inode_state_read_once(&inode->v) & I_DIRTY);
 
@@ -1902,7 +1915,7 @@ static void bch2_evict_inode(struct inode *vinode)
 			}
 		}
 	}
-
+#endif
 	truncate_inode_pages_final(&inode->v.i_data);
 
 	cancel_delayed_work_sync(&inode->ei_writeback_timer);
@@ -2040,7 +2053,7 @@ static int bch2_sync_fs(struct super_block *sb, int wait)
 	if (c->opts.journal_flush_disabled)
 		;
 	else if (!wait)
-		bch2_journal_flush_async(&c->journal, NULL);
+		bch2_journal_flush_async(&c->journal, BCH_WATERMARK_normal, NULL);
 	else
 		ret = bch2_journal_flush(&c->journal);
 
@@ -2287,7 +2300,7 @@ got_sb:
 	if (ret)
 		goto err_put_super;
 
-	sb->s_bdi->ra_pages		= VM_READAHEAD_PAGES;
+	sb->s_bdi->ra_pages = bch2_fs_ra_pages(c);
 
 	scoped_guard(rcu) {
 		for_each_online_member_rcu(c, ca) {
@@ -2390,11 +2403,13 @@ static int bch2_fs_parse_param(struct fs_context *fc,
 	if (fc->root)
 		c = fc->root->d_sb->s_fs_info;
 
+	CLASS(printbuf, err)();
 	int ret = bch2_parse_one_mount_opt(c, &opts->opts,
 					   &opts->parse_later, param->key,
-					   param->string);
+					   param->string,
+					   &err);
 	if (ret)
-		pr_err("Error parsing option %s: %s", param->key, bch2_err_str(ret));
+		pr_err("Error parsing option %s", err.buf);
 
 	return bch2_err_class(ret);
 }
@@ -2423,7 +2438,7 @@ static int bch2_fs_reconfigure(struct fs_context *fc)
 			ret = bch2_fs_read_write(c);
 			if (ret) {
 				bch_err(c, "error going rw: %i", ret);
-				return -EINVAL;
+				return bch_err_throw(c, EINVAL_reconfigure_read_write);
 			}
 
 			sb->s_flags &= ~SB_RDONLY;
@@ -2477,6 +2492,7 @@ void bch2_fs_vfs_exit(struct bch_fs *c)
 
 int bch2_fs_vfs_init(struct bch_fs *c)
 {
+	fdm_init(&c->fdm_table);
 	INIT_LIST_HEAD(&c->vfs.inodes_list);
 	mutex_init(&c->vfs.inodes_lock);
 

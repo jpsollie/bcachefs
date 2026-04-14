@@ -101,7 +101,9 @@ static inline s64 bch2_bucket_sectors_fragmented(struct bch_dev *ca,
 {
 	int d = bch2_bucket_sectors(a);
 
-	return d ? max(0, ca->mi.bucket_size - d) : 0;
+	return d ? max(0, ca->mi.bucket_size - d)
+		 : !data_type_is_empty(a.data_type) ? ca->mi.bucket_size
+		 : 0;
 }
 
 static inline s64 bch2_bucket_sectors_unstriped(struct bch_alloc_v4 a)
@@ -318,8 +320,8 @@ int bch2_bucket_gens_init(struct bch_fs *);
 
 int bch2_alloc_read(struct bch_fs *);
 
-int bch2_bucket_do_index(struct btree_trans *, struct bch_dev *,
-			 struct bkey_s_c, const struct bch_alloc_v4 *, bool);
+int bch2_bucket_do_freespace_index(struct btree_trans *, struct bch_dev *,
+				   struct bkey_s_c, const struct bch_alloc_v4 *, bool);
 
 int bch2_alloc_key_to_dev_counters(struct btree_trans *, struct bch_dev *,
 				   const struct bch_alloc_v4 *,
@@ -331,14 +333,12 @@ int bch2_trigger_alloc(struct btree_trans *, enum btree_id, unsigned,
 int bch2_dev_remove_alloc(struct bch_fs *, struct bch_dev *);
 
 void bch2_recalc_capacity(struct bch_fs *);
+unsigned long bch2_fs_ra_pages(struct bch_fs *);
 u64 bch2_min_rw_member_capacity(struct bch_fs *);
 
 void bch2_dev_allocator_set_rw(struct bch_fs *, struct bch_dev *, bool);
 void bch2_dev_allocator_remove(struct bch_fs *, struct bch_dev *);
 void bch2_dev_allocator_add(struct bch_fs *, struct bch_dev *);
-
-void bch2_dev_allocator_background_exit(struct bch_dev *);
-void bch2_dev_allocator_background_init(struct bch_dev *);
 
 void bch2_fs_allocator_background_init(struct bch_fs *);
 

@@ -35,6 +35,7 @@ struct ec_stripe_new {
 	struct moving_context	*ctxt;
 	struct mutex		lock;
 	struct list_head	list;
+	struct work_struct	work;
 
 	atomic_t		ref[STRIPE_REF_NR];
 
@@ -44,9 +45,13 @@ struct ec_stripe_new {
 	enum bch_watermark	watermark;
 	u8			nr_data;
 	u8			nr_parity;
-	bool			allocated;
-	bool			pending;
-	bool			have_old_stripe;
+
+	bool			have_old_stripe:1;
+
+	bool			allocated:1;
+	bool			mem_allocated:1;
+	bool			old_mem_allocated:1;
+	bool			pending:1;
 
 	unsigned long		blocks_gotten[BITS_TO_LONGS(BCH_BKEY_PTRS_MAX)];
 	unsigned long		blocks_allocated[BITS_TO_LONGS(BCH_BKEY_PTRS_MAX)];
@@ -104,7 +109,7 @@ struct ec_stripe_head *bch2_ec_stripe_head_get(struct btree_trans *,
 			struct alloc_request *, unsigned);
 
 void bch2_do_stripe_deletes(struct bch_fs *);
-void bch2_ec_do_stripe_creates(struct bch_fs *);
+void bch2_ec_stripe_create_start(struct bch_fs *, struct ec_stripe_new *);
 void bch2_ec_stripe_new_free(struct bch_fs *, struct ec_stripe_new *);
 
 static inline void ec_stripe_new_get(struct ec_stripe_new *s,
@@ -124,7 +129,7 @@ static inline void ec_stripe_new_put(struct bch_fs *c, struct ec_stripe_new *s,
 			bch2_ec_stripe_new_free(c, s);
 			break;
 		case STRIPE_REF_io:
-			bch2_ec_do_stripe_creates(c);
+			bch2_ec_stripe_create_start(c, s);
 			break;
 		default:
 			BUG();
@@ -132,11 +137,19 @@ static inline void ec_stripe_new_put(struct bch_fs *c, struct ec_stripe_new *s,
 }
 
 void bch2_ec_stripe_delete_work(struct work_struct *);
-void bch2_ec_stripe_create_work(struct work_struct *);
 
 void bch2_new_stripes_to_text(struct printbuf *, struct bch_fs *);
 
 struct moving_context;
 int bch2_stripe_repair(struct moving_context *, struct btree_iter *, struct bkey_s_c_stripe);
+
+void bch2_logged_op_stripe_update_to_text(struct printbuf *, struct bch_fs *, struct bkey_s_c);
+
+#define bch2_bkey_ops_logged_op_stripe_update ((struct bkey_ops) {	\
+	.val_to_text	= bch2_logged_op_stripe_update_to_text,		\
+	.min_val_size	= 40,						\
+})
+
+int bch2_resume_logged_op_stripe_update(struct btree_trans *, struct bkey_i *);
 
 #endif /* _BCACHEFS_DATA_EC_CREATE_H */

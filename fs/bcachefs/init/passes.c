@@ -6,6 +6,7 @@
 #include "alloc/background.h"
 #include "alloc/backpointers.h"
 #include "alloc/check.h"
+#include "alloc/discard.h"
 #include "alloc/lru.h"
 
 #include "btree/check.h"
@@ -156,7 +157,8 @@ static void bch2_sb_recovery_pass_complete(struct bch_fs *c,
 	__clear_bit_le64(bch2_recovery_pass_to_stable(pass),
 			 ext->recovery_passes_required);
 
-	if (bch2_is_zero(ext->recovery_passes_required, sizeof(ext->recovery_passes_required)))
+	struct bch_fs_recovery *r = &c->recovery;
+	if (!r->current_passes)
 		memset(ext->errors_silent, 0, sizeof(ext->errors_silent));
 
 	struct recovery_pass_entry *e = bch2_sb_recovery_pass_entry(c, pass);
@@ -258,11 +260,11 @@ struct recovery_pass {
 };
 
 static const struct recovery_pass recovery_passes[] = {
-#define x(_fn, _id, _when, _depends)	{	\
-	.fn		= bch2_##_fn,		\
-	.name		= #_fn,			\
-	.when		= _when,		\
-	.depends	= _depends,		\
+#define x(_fn, _id, _when, _depends, ...)	{	\
+	.fn		= bch2_##_fn,			\
+	.name		= #_fn,				\
+	.when		= _when,			\
+	.depends	= _depends,			\
 },
 	BCH_RECOVERY_PASSES()
 #undef x

@@ -410,6 +410,7 @@ static inline int journal_res_get_fast(struct journal *j,
 	res->offset	= old.cur_entry_offset;
 	res->seq	= journal_cur_seq(j);
 	res->seq -= (res->seq - old.idx) & JOURNAL_STATE_BUF_MASK;
+	res->has_overwrites = j->buf[res->seq & JOURNAL_BUF_MASK].has_overwrites;
 	return 1;
 }
 
@@ -444,11 +445,13 @@ void bch2_journal_entry_res_resize(struct journal *,
 				   struct journal_entry_res *,
 				   unsigned);
 
-int bch2_journal_flush_seq_async(struct journal *, u64, struct closure *);
-void bch2_journal_flush_async(struct journal *, struct closure *);
+int bch2_journal_flush_seq_async(struct journal *, u64, unsigned, struct closure *);
+void bch2_journal_flush_async(struct journal *, unsigned, struct closure *);
 
 int bch2_journal_flush_seq(struct journal *, u64, unsigned);
 int bch2_journal_flush(struct journal *);
+void bch2_journal_advance_rewind_seq(struct journal *, u64);
+int bch2_journal_add_rewind_range(struct bch_fs *, u64, u64);
 bool bch2_journal_noflush_seq(struct journal *, u64, u64);
 
 int __bch2_journal_meta(struct journal *);

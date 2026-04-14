@@ -197,7 +197,7 @@ int bch2_dev_journal_bucket_delete(struct bch_dev *ca, u64 b)
 
 	if (pos == ja->nr) {
 		bch_err_dev(ca, "journal bucket %llu not found when deleting", b);
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_journal_bucket_not_found);
 	}
 
 	u64 *new_buckets = kcalloc(ja->nr, sizeof(u64), GFP_KERNEL);
@@ -367,7 +367,7 @@ int bch2_fs_journal_start(struct journal *j, struct journal_start_info info)
 
 	if (info.cur_seq >= JOURNAL_SEQ_MAX) {
 		bch_err(c, "cannot start: journal seq overflow");
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_journal_seq_overflow);
 	}
 
 	/* Clean filesystem? */
@@ -403,6 +403,10 @@ int bch2_fs_journal_start(struct journal *j, struct journal_start_info info)
 	j->seq_ondisk		= cur_seq - 1;
 	j->pin.front		= last_seq;
 	j->last_seq		= last_seq;
+	if (!j->rewind_seq) {
+		j->rewind_seq		= last_seq;
+		j->rewind_seq_ondisk	= last_seq;
+	}
 	j->pin.back		= cur_seq;
 	atomic64_set(&j->seq, cur_seq - 1);
 
@@ -574,6 +578,7 @@ void bch2_fs_journal_exit(struct journal *j)
 		destroy_workqueue(j->wq);
 
 	darray_exit(&j->early_journal_entries);
+	darray_exit(&j->rewind_ranges);
 
 	for (unsigned i = 0; i < ARRAY_SIZE(j->buf); i++)
 		kvfree(j->buf[i].data);

@@ -202,6 +202,7 @@ read_attribute(btree_reserve_cache);
 read_attribute(btree_write_buffer);
 read_attribute(open_buckets);
 read_attribute(open_buckets_partial);
+read_attribute(discards);
 read_attribute(nocow_lock_table);
 read_attribute(replicas);
 
@@ -242,7 +243,7 @@ read_attribute(recent_counters);
 write_attribute(perf_test);
 #endif /* CONFIG_BCACHEFS_TESTS */
 
-#define x(_name)						\
+#define x(_name, ...)						\
 	static struct attribute sysfs_time_stat_##_name =		\
 		{ .name = #_name, .mode = 0644 };
 	BCH_TIME_STATS()
@@ -381,6 +382,9 @@ SHOW(bch2_fs)
 	if (attr == &sysfs_open_buckets_partial)
 		bch2_open_buckets_partial_to_text(out, c);
 
+	if (attr == &sysfs_discards)
+		bch2_discards_to_text(out, c, &c->discards.s);
+
 	if (attr == &sysfs_compression_stats)
 		bch2_compression_stats_to_text(out, c);
 
@@ -439,9 +443,6 @@ STORE(bch2_fs)
 	if (attr == &sysfs_trigger_btree_updates)
 		queue_work(c->btree.interior_updates.worker, &c->btree.interior_updates.work);
 
-	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_sysfs))
-		return -EROFS;
-
 	if (attr == &sysfs_trigger_btree_cache_shrink) {
 		struct bch_fs_btree_cache *bc = &c->btree.cache;
 		struct shrink_control sc;
@@ -459,30 +460,11 @@ STORE(bch2_fs)
 		c->btree.key_cache.shrink->scan_objects(c->btree.key_cache.shrink, &sc);
 	}
 
-	if (attr == &sysfs_trigger_btree_write_buffer_flush)
-		bch2_trans_do(c,
-			      (bch2_btree_write_buffer_flush_sync(trans),
-			       bch2_trans_begin(trans)));
-
-	if (attr == &sysfs_trigger_gc)
-		bch2_gc_gens(c);
-
 	if (attr == &sysfs_trigger_discards)
-		bch2_do_discards(c);
+		bch2_do_discards_async(c);
 
 	if (attr == &sysfs_trigger_invalidates)
 		bch2_do_invalidates(c);
-
-	if (attr == &sysfs_trigger_journal_commit)
-		bch2_journal_flush(&c->journal);
-
-	if (attr == &sysfs_trigger_journal_flush) {
-		bch2_journal_flush_all_pins(&c->journal);
-		bch2_journal_meta(&c->journal);
-	}
-
-	if (attr == &sysfs_trigger_journal_writes)
-		bch2_journal_do_writes(&c->journal);
 
 	if (attr == &sysfs_trigger_freelist_wakeup)
 		closure_wake_up(&c->allocator.freelist_wait);
@@ -497,6 +479,28 @@ STORE(bch2_fs)
 
 	if (attr == &sysfs_trigger_reconcile_pending_wakeup)
 		bch2_reconcile_pending_wakeup(c);
+
+	if (!enumerated_ref_tryget(&c->writes, BCH_WRITE_REF_sysfs))
+		return -EROFS;
+
+	if (attr == &sysfs_trigger_journal_commit)
+		bch2_journal_flush(&c->journal);
+
+	if (attr == &sysfs_trigger_journal_flush) {
+		bch2_journal_flush_outstanding_pins(&c->journal);
+		bch2_journal_meta(&c->journal);
+	}
+
+	if (attr == &sysfs_trigger_journal_writes)
+		bch2_journal_do_writes(&c->journal);
+
+	if (attr == &sysfs_trigger_btree_write_buffer_flush)
+		bch2_trans_do(c,
+			      (bch2_btree_write_buffer_flush_sync(trans),
+			       bch2_trans_begin(trans)));
+
+	if (attr == &sysfs_trigger_gc)
+		bch2_gc_gens(c);
 
 	if (attr == &sysfs_trigger_delete_dead_snapshots)
 		__bch2_delete_dead_snapshots(c);
@@ -626,6 +630,7 @@ struct attribute *bch2_fs_internal_files[] = {
 	&sysfs_new_stripes,
 	&sysfs_open_buckets,
 	&sysfs_open_buckets_partial,
+	&sysfs_discards,
 	&sysfs_write_refs,
 	&sysfs_nocow_lock_table,
 	&sysfs_replicas,
@@ -769,7 +774,7 @@ static ssize_t sysfs_opt_show(struct bch_fs *c,
 	} else if ((opt->flags & OPT_DEVICE) && opt->get_member)  {
 		v = bch2_opt_from_sb(c->disk_sb.sb, id, ca->dev_idx);
 	} else {
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_sysfs_opt_not_found);
 	}
 
 	bch2_opt_to_text(out, c, c->disk_sb.sb, opt, v, OPT_SHOW_FULL_LIST);
@@ -804,7 +809,7 @@ static ssize_t sysfs_opt_store(struct bch_fs *c,
 		bch2_opt_hook_pre_set(c, ca, 0, id, v, true);
 
 	if (!ret) {
-		bool is_sb = opt->get_sb || opt->get_member;
+		bool is_sb = opt->get_sb || opt->get_member || opt->get_ext;
 		bool changed = false;
 
 		if (is_sb) {
@@ -878,7 +883,7 @@ SHOW(bch2_fs_time_stats)
 {
 	struct bch_fs *c = container_of(kobj, struct bch_fs, time_stats);
 
-#define x(name)								\
+#define x(name, ...)							\
 	if (attr == &sysfs_time_stat_##name)				\
 		bch2_time_stats_to_text(out, &c->times[BCH_TIME_##name]);
 	BCH_TIME_STATS()
@@ -891,7 +896,7 @@ STORE(bch2_fs_time_stats)
 {
 	struct bch_fs *c = container_of(kobj, struct bch_fs, time_stats);
 
-#define x(name)								\
+#define x(name, ...)							\
 	if (attr == &sysfs_time_stat_##name)				\
 		bch2_time_stats_reset(&c->times[BCH_TIME_##name]);
 	BCH_TIME_STATS()
@@ -901,7 +906,7 @@ STORE(bch2_fs_time_stats)
 SYSFS_OPS(bch2_fs_time_stats);
 
 struct attribute *bch2_fs_time_stats_files[] = {
-#define x(name)						\
+#define x(name, ...)					\
 	&sysfs_time_stat_##name,
 	BCH_TIME_STATS()
 #undef x
@@ -914,7 +919,7 @@ SHOW(bch2_fs_time_stats_json)
 {
 	struct bch_fs *c = container_of(kobj, struct bch_fs, time_stats_json);
 
-#define x(name)								\
+#define x(name, ...)							\
 	if (attr == &sysfs_time_stat_##name)				\
 		bch2_time_stats_json_to_text(out, &c->times[BCH_TIME_##name], NULL, 0);
 	BCH_TIME_STATS()
@@ -927,7 +932,7 @@ STORE(bch2_fs_time_stats_json)
 {
 	struct bch_fs *c = container_of(kobj, struct bch_fs, time_stats_json);
 
-#define x(name)								\
+#define x(name, ...)							\
 	if (attr == &sysfs_time_stat_##name)				\
 		bch2_time_stats_reset(&c->times[BCH_TIME_##name]);
 	BCH_TIME_STATS()
@@ -937,7 +942,7 @@ STORE(bch2_fs_time_stats_json)
 SYSFS_OPS(bch2_fs_time_stats_json);
 
 struct attribute *bch2_fs_time_stats_json_files[] = {
-#define x(name)						\
+#define x(name, ...)					\
 	&sysfs_time_stat_##name,
 	BCH_TIME_STATS()
 #undef x
@@ -1018,6 +1023,9 @@ SHOW(bch2_dev)
 	if (attr == &sysfs_open_buckets)
 		bch2_open_buckets_to_text(out, c, ca);
 
+	if (attr == &sysfs_discards)
+		bch2_fast_discards_to_text(out, ca);
+
 	int opt_id = bch2_opt_lookup(attr->name);
 	if (opt_id >= 0)
 		return sysfs_opt_show(c, ca, opt_id, out);
@@ -1081,6 +1089,7 @@ struct attribute *bch2_dev_files[] = {
 	/* debug: */
 	&sysfs_alloc_debug,
 	&sysfs_open_buckets,
+	&sysfs_discards,
 
 	&sysfs_read_refs,
 	&sysfs_write_refs,

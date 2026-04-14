@@ -55,6 +55,7 @@ struct journal_buf {
 	bool			write_allocated:1;
 	bool			write_done:1;
 	bool			empty:1;
+	bool			has_overwrites:1;
 	u8			idx;
 };
 
@@ -94,6 +95,7 @@ struct journal_entry_pin {
 
 struct journal_res {
 	bool			ref;
+	bool			has_overwrites;
 	u16			u64s;
 	u32			offset;
 	u64			seq;
@@ -177,6 +179,11 @@ struct journal_bio {
 	struct bio		bio;
 };
 
+struct journal_rewind_range {
+	u64			from;
+	u64			to;
+};
+
 /* Embedded in struct bch_fs */
 struct journal {
 	/* Fastpath stuff up front: */
@@ -251,6 +258,18 @@ struct journal {
 	u64			err_seq;
 	u64			last_empty_seq;
 	u64			oldest_seq_found_ondisk;
+
+	/* Oldest journal seq that is safe to rewind to — discards of buckets
+	 * freed at >= this seq have not yet been issued */
+	u64			rewind_seq;
+	u64			rewind_seq_ondisk;
+
+	/*
+	 * Rewind ranges: keys from journal entries with seq
+	 * in (to, from] use overwrite entries instead of
+	 * btree_keys entries.
+	 */
+	DARRAY(struct journal_rewind_range) rewind_ranges;
 
 	/*
 	 * FIFO of journal entries whose btree updates have not yet been

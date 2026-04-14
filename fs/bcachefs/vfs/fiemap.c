@@ -237,10 +237,10 @@ int bch2_fiemap(struct inode *vinode, struct fiemap_extent_info *info,
 	try(fiemap_prep(&ei->v, info, start, &len, 0));
 
 	if (start + len < start)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_fiemap_overflow);
 
-	start >>= 9;
 	u64 end = (start + len) >> 9;
+	start >>= 9;
 
 	bch2_bkey_buf_init(&cur.kbuf);
 	bch2_bkey_buf_init(&prev.kbuf);

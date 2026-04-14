@@ -29,6 +29,7 @@
 #include "init/recovery.h"
 
 #include "journal/init.h"
+#include "journal/journal.h"
 #include "journal/read.h"
 #include "journal/reclaim.h"
 #include "journal/sb.h"
@@ -140,7 +141,7 @@ static void kill_btree(struct bch_fs *c, enum btree_id btree)
 }
 
 /* for -o reconstruct_alloc: */
-void bch2_reconstruct_alloc(struct bch_fs *c)
+static void bch2_reconstruct_alloc(struct bch_fs *c)
 {
 	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
 	guard(mutex)(&c->sb_lock);
@@ -194,19 +195,34 @@ void bch2_reconstruct_alloc(struct bch_fs *c)
 			kill_btree(c, i);
 }
 
-/*
- * Btree node pointers have a field to stack a pointer to the in memory btree
- * node; we need to zero out this field when reading in btree nodes, or when
- * reading in keys from the journal:
- */
-static void zero_out_btree_mem_ptr(struct journal_keys *keys)
+void bch2_ignore_journal_rewind_errors(struct bch_fs *c)
 {
-	struct bch_fs *c = container_of(keys, struct bch_fs, journal_keys);
-	darray_for_each(*keys, i) {
-		struct bkey_i *k = journal_key_k(c, i);
-		if (k->k.type == KEY_TYPE_btree_ptr_v2)
-			bkey_i_to_btree_ptr_v2(k)->v.mem_ptr = 0;
-	}
+	/*
+	 * Silence expected allocation errors: after journal rewind, alloc info
+	 * will be stale for buckets whose state changed between the rewind
+	 * point and the original journal head.
+	 */
+	guard(memalloc_flags)(PF_MEMALLOC_NOFS);
+	guard(mutex)(&c->sb_lock);
+	struct bch_sb_field_ext *ext =
+		bch2_sb_field_get(c->disk_sb.sb, ext);
+
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_data_type_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_gen_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_dirty_sectors_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_cached_sectors_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_stripe_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_stripe_redundancy_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_need_discard_key_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_freespace_key_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_freespace_hole_missing, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_bucket_gens_key_wrong, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_alloc_key_to_missing_lru_entry, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_lru_entry_bad, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_accounting_mismatch, ext->errors_silent);
+	__set_bit_le64(BCH_FSCK_ERR_backpointer_to_missing_ptr, ext->errors_silent);
+
+	bch2_write_super(c);
 }
 
 int bch2_set_may_go_rw(struct bch_fs *c)
@@ -322,7 +338,7 @@ static int bch2_journal_replay_key(struct btree_trans *trans,
 						     BIT_ULL(BCH_RECOVERY_PASS_check_topology)))) {
 			bch_err(c, "have key in journal replay for btree depth that does not exist, confused\n%s",
 				buf.buf);
-			return -EINVAL;
+			return bch_err_throw(c, EINVAL_journal_replay_key_bad_btree_depth);
 		}
 
 		if (!k->allocated) {
@@ -490,7 +506,7 @@ int bch2_journal_replay(struct bch_fs *c)
 
 	/* if we did any repair, flush it immediately */
 	if (immediate_flush) {
-		bch2_journal_flush_all_pins(&c->journal);
+		bch2_journal_flush_outstanding_pins(&c->journal);
 		ret = bch2_journal_meta(&c->journal);
 	}
 
@@ -657,12 +673,21 @@ static int __bch2_fs_recovery(struct bch_fs *c)
 
 	bch2_journal_pos_from_member_info_resume(c);
 
-	if (!c->sb.clean || c->opts.retain_recovery_info) {
+	if (!c->sb.clean ||
+	    c->opts.retain_recovery_info ||
+	    c->opts.scrub_recent_journal_entries == BCH_SCRUB_JOURNAL_always) {
 		struct genradix_iter iter;
 		struct journal_replay **i;
 
 		bch_verbose(c, "starting journal read");
 		try(bch2_journal_read(c, &journal_start));
+
+		/*
+		 * If we found persisted rewind ranges from a previous
+		 * crashed rewind, re-read any journal entries that were
+		 * dropped because they were older than last_seq:
+		 */
+		try(bch2_journal_reread_for_rewind(c));
 
 		/*
 		 * note: cmd_list_journal needs the blacklist table fully up to date so
@@ -709,8 +734,6 @@ static int __bch2_fs_recovery(struct bch_fs *c)
 				}
 		}
 
-		try(bch2_journal_keys_sort(c));
-
 		if (c->sb.clean && last_journal_entry)
 			try(bch2_verify_superblock_clean(c, &clean, last_journal_entry));
 	} else {
@@ -727,8 +750,6 @@ use_clean:
 	c->journal_replay_seq_start	= journal_start.last_seq;
 	c->journal_replay_seq_end	= journal_start.replay_end;
 
-	zero_out_btree_mem_ptr(&c->journal_keys);
-
 	try(journal_replay_early(c, clean));
 
 	scoped_guard(rwsem_write, &c->state_lock)
@@ -739,16 +760,28 @@ use_clean:
 		c->opts.read_only = true;
 	}
 
+	if (c->sb.features & BIT_ULL(BCH_FEATURE_no_default_sb)) {
+		bch_info(c, "filesystem does not have default superblock layout, mounting ro");
+		c->opts.read_only = true;
+	}
+
 	if (!c->opts.read_only &&
 	    (c->sb.features & BIT_ULL(BCH_FEATURE_no_alloc_info))) {
 		bch_info(c, "mounting a filesystem with no alloc info read-write; will recreate");
 
 		bch2_reconstruct_alloc(c);
-	} else if (c->opts.reconstruct_alloc) {
+	} else if (c->opts.dangerously_reconstruct_alloc) {
 		bch2_journal_log_msg(c, "dropping alloc info");
 		bch_info(c, "dropping and reconstructing all alloc info");
 
 		bch2_reconstruct_alloc(c);
+	}
+
+	if (c->opts.journal_rewind) {
+		try(bch2_journal_add_rewind_range(c,
+				journal_start.replay_end,
+				c->opts.journal_rewind));
+		bch2_ignore_journal_rewind_errors(c);
 	}
 
 	if (c->sb.features & BIT_ULL(BCH_FEATURE_no_alloc_info)) {
@@ -791,6 +824,8 @@ use_clean:
 	if (c->sb.encryption_type && !c->sb.clean)
 		atomic64_add(1 << 16, &c->key_version);
 
+	try(bch2_journal_keys_sort(c));
+
 	try(read_btree_roots(c));
 
 	set_bit(BCH_FS_btree_running, &c->flags);
@@ -799,6 +834,43 @@ use_clean:
 	try(bch2_opts_hooks_pre_set(c));
 
 	try(bch2_sb_set_upgrade_extra(c));
+
+	if (c->opts.scrub_recent_journal_entries &&
+	    (!c->sb.clean ||
+	     c->opts.scrub_recent_journal_entries == BCH_SCRUB_JOURNAL_always)) {
+		u64 rewind_seq = 0;
+		set_bit(BCH_FS_scrub_journal, &c->flags);
+		try(bch2_scrub_journal(c, &rewind_seq));
+		clear_bit(BCH_FS_scrub_journal, &c->flags);
+		if (rewind_seq) {
+			CLASS(bch_log_msg, msg)(c);
+			prt_printf(&msg.m, "journal scrub: device not honoring flush/FUA, "
+				   "rewinding from seq %llu (",
+				   journal_start.replay_end);
+			bch2_journal_seq_datetime_to_text(&msg.m, c, journal_start.replay_end);
+			prt_printf(&msg.m, ") back to seq %llu (",
+				   rewind_seq);
+			bch2_journal_seq_datetime_to_text(&msg.m, c, rewind_seq);
+			prt_str(&msg.m, ")");
+
+			bch2_journal_log_msg(c, "%s", msg.m.buf);
+			c->opts.journal_rewind = rewind_seq;
+			c->opts.fsck = true;
+
+			try(bch2_journal_add_rewind_range(c,
+					journal_start.replay_end,
+					rewind_seq));
+			bch2_ignore_journal_rewind_errors(c);
+
+			/*
+			 * Re-read journal buckets to pick up entries that
+			 * were dropped during the first read because they
+			 * were older than last_seq:
+			 */
+			try(bch2_journal_reread_for_rewind(c));
+			try(bch2_journal_keys_sort(c));
+		}
+	}
 
 	try(bch2_run_recovery_passes_startup(c, 0));
 
@@ -821,7 +893,7 @@ use_clean:
 		test_bit(BCH_FS_errors_fixed_silent, &c->flags);
 
 	if (errors_fixed) {
-		bch2_journal_flush_all_pins(&c->journal);
+		bch2_journal_flush_outstanding_pins(&c->journal);
 		bch2_journal_meta(&c->journal);
 	}
 
@@ -1031,6 +1103,12 @@ int bch2_fs_initialize(struct bch_fs *c)
 	bch_err_msg(c, ret, "writing first journal entry");
 	if (ret)
 		return ret;
+
+	/* Don't allow rewind into initialization entries */
+	u64 init_seq = atomic64_read(&c->journal.seq) + 1;
+	bch2_journal_advance_rewind_seq(&c->journal, init_seq);
+	bch_info(c, "fs initialized, journal seq %llu rewind_seq %llu",
+		 init_seq - 1, init_seq);
 
 	scoped_guard(memalloc_flags, PF_MEMALLOC_NOFS) {
 		guard(mutex)(&c->sb_lock);

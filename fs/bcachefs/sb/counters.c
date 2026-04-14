@@ -20,7 +20,7 @@ const char * const bch2_counter_names[] = {
 };
 
 const enum bch_counters_flags bch2_counter_flags_map[] = {
-#define x(t, n, flags) [BCH_COUNTER_##t] = flags,
+#define x(t, n, flags, ...) [BCH_COUNTER_##t] = flags,
 	BCH_PERSISTENT_COUNTERS()
 #undef x
 };
@@ -152,6 +152,11 @@ void bch2_fs_counters_exit(struct bch_fs *c)
 	free_percpu(c->counters.now);
 }
 
+void bch2_fs_counters_init_early(struct bch_fs *c)
+{
+	INIT_DELAYED_WORK(&c->counters.work, bch2_sb_counters_work);
+}
+
 int bch2_fs_counters_init(struct bch_fs *c)
 {
 	c->counters.now = __alloc_percpu(sizeof(u64) * BCH_COUNTER_NR, sizeof(u64));
@@ -159,8 +164,6 @@ int bch2_fs_counters_init(struct bch_fs *c)
 		return -BCH_ERR_ENOMEM_fs_counters_init;
 
 	try(bch2_sb_counters_to_cpu(c));
-
-	INIT_DELAYED_WORK(&c->counters.work, bch2_sb_counters_work);
 	return 0;
 }
 
@@ -184,7 +187,7 @@ long bch2_ioctl_query_counters(struct bch_fs *c,
 
 	if ((arg.flags & ~BCH_IOCTL_QUERY_COUNTERS_MOUNT) ||
 	    arg.pad)
-		return -EINVAL;
+		return bch_err_throw(c, EINVAL_ioctl_query_counters_bad_flags);
 
 	arg.nr = min(arg.nr, BCH_COUNTER_NR);
 	try(put_user(arg.nr, &user_arg->nr));

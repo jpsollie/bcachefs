@@ -71,7 +71,6 @@
 
 #include "alloc/accounting_types.h"
 #include "alloc/buckets_types.h"
-#include "alloc/buckets_waiting_for_journal_types.h"
 #include "alloc/disk_groups_types.h"
 #include "alloc/replicas_types.h"
 #include "alloc/types.h"
@@ -104,6 +103,7 @@
 
 #include "snapshots/types.h"
 
+#include "vfs/fdm.h"
 #include "vfs/types.h"
 
 #define bch2_fs_init_fault(name)					\
@@ -301,42 +301,98 @@ do {									\
 BCH_DEBUG_PARAMS_ALL()
 #undef BCH_DEBUG_PARAM
 
-#define BCH_TIME_STATS()			\
-	x(btree_node_mem_alloc)			\
-	x(btree_node_split)			\
-	x(btree_node_compact)			\
-	x(btree_node_merge)			\
-	x(btree_node_sort)			\
-	x(btree_node_read)			\
-	x(btree_node_read_done)			\
-	x(btree_node_write)			\
-	x(btree_interior_update_foreground)	\
-	x(btree_interior_update_total)		\
-	x(btree_write_buffer_flush)		\
-	x(btree_gc)				\
-	x(data_write)				\
-	x(data_read)				\
-	x(data_promote)				\
-	x(journal_flush_write)			\
-	x(journal_noflush_write)		\
-	x(journal_flush_seq)			\
-	x(journal_pin_flush_btree)		\
-	x(journal_pin_flush_key_cache)		\
-	x(journal_pin_flush_other)		\
-	x(blocked_journal_low_on_space)		\
-	x(blocked_journal_low_on_pin)		\
-	x(blocked_journal_max_in_flight)	\
-	x(blocked_journal_max_open)		\
-	x(blocked_journal_write_buffer_flush)	\
-	x(blocked_key_cache_flush)		\
-	x(blocked_allocate)			\
-	x(blocked_allocate_open_bucket)		\
-	x(blocked_write_buffer_full)		\
-	x(blocked_writeback_throttle)		\
-	x(nocow_lock_contended)
+#define BCH_TIME_STATS()						\
+	x(btree_node_mem_alloc,						\
+	  "Allocate memory in the btree node cache "			\
+	  "for a new btree node")					\
+	x(btree_node_split,						\
+	  "Split a full btree node into two new nodes")			\
+	x(btree_node_compact,						\
+	  "Compact a full btree node on disk")				\
+	x(btree_node_merge,						\
+	  "Merge two adjacent btree nodes")				\
+	x(btree_node_sort,						\
+	  "Sort and resort entire btree nodes in memory, "		\
+	  "after reading from disk or for compacting")			\
+	x(btree_node_read,						\
+	  "Read btree nodes from disk")					\
+	x(btree_node_read_done,						\
+	  "Post-read btree node processing")				\
+	x(btree_node_write,						\
+	  "Write btree node to disk")					\
+	x(btree_interior_update_foreground,				\
+	  "Foreground time for topology-changing btree updates "	\
+	  "(splits, compactions, merges); roughly corresponds "		\
+	  "to lock held time")						\
+	x(btree_interior_update_total,					\
+	  "Total time for topology-changing btree updates, "		\
+	  "including background transaction phase after "		\
+	  "new nodes are written")					\
+	x(btree_node_cache_scan,					\
+	  "scan btree node cache for eviction")				\
+	x(btree_key_cache_scan,						\
+	  "scan btree key cache for eviction")				\
+	x(btree_write_buffer_flush,					\
+	  "Flush btree write buffer to btree")				\
+	x(btree_gc,							\
+	  "GC pass recalculating oldest generation numbers")		\
+	x(data_write,							\
+	  "Core write path: allocate space, compress, "			\
+	  "encrypt, checksum, issue writes, "				\
+	  "update extents btree")					\
+	x(data_read,							\
+	  "Core read path: look up extents btree, "			\
+	  "issue reads, checksum, decrypt, decompress")			\
+	x(data_promote,							\
+	  "Promote: write a cached copy of an extent "			\
+	  "to promote_target on read")					\
+	x(journal_flush_write,						\
+	  "Flush journal writes: cache flush to devices "		\
+	  "then FUA journal writes")					\
+	x(journal_noflush_write,					\
+	  "Non-flush journal writes, without cache "			\
+	  "flushes or FUA")						\
+	x(journal_flush_seq,						\
+	  "Flush a journal sequence number to disk "			\
+	  "for sync, fsync, and bucket reuse")				\
+	x(journal_pin_flush_btree,					\
+	  "Flush btree journal pins")					\
+	x(journal_pin_flush_key_cache,					\
+	  "Flush key cache journal pins")				\
+	x(journal_pin_flush_other,					\
+	  "Flush other journal pins")					\
+	x(blocked_journal_low_on_space,					\
+	  "Blocked: journal reclaim not keeping up "			\
+	  "with reclaiming space")					\
+	x(blocked_journal_low_on_pin,					\
+	  "Blocked: journal pins (dirty btree nodes, "			\
+	  "key cache entries) not flushed fast enough")			\
+	x(blocked_journal_max_in_flight,				\
+	  "Blocked: too many journal writes in flight")			\
+	x(blocked_journal_max_open,					\
+	  "Blocked: too many journal entries open, "			\
+	  "not yet closed for writing")					\
+	x(blocked_journal_write_buffer_flush,				\
+	  "Blocked: waiting for write buffer flush")			\
+	x(blocked_key_cache_flush,					\
+	  "Blocked: waiting for key cache flush")			\
+	x(blocked_allocate,						\
+	  "Blocked: bucket allocation waiting, copygc or "		\
+	  "allocator thread not keeping up")				\
+	x(blocked_allocate_open_bucket,					\
+	  "Blocked: all open bucket handles in use")			\
+	x(blocked_write_buffer_full,					\
+	  "Blocked: write buffer full")					\
+	x(blocked_writeback_throttle,					\
+	  "Blocked: writeback throttle")				\
+	x(nocow_lock_contended,						\
+	  "Nocow lock contention")					\
+	x(blocked_discard_journal_flush,				\
+	  "Blocked: discard worker waiting for journal flush "		\
+	  "to advance rewind_seq and release buckets")
 
 enum bch_time_stats {
-#define x(name) BCH_TIME_##name,
+#define x(name, ...) BCH_TIME_##name,
 	BCH_TIME_STATS()
 #undef x
 	BCH_TIME_STAT_NR
@@ -351,11 +407,6 @@ struct btree;
 
 struct io_count {
 	u64			sectors[2][BCH_DATA_NR];
-};
-
-struct discard_in_flight {
-	bool			in_progress:1;
-	u64			bucket:63;
 };
 
 #define BCH_DEV_READ_REFS()				\
@@ -389,7 +440,8 @@ enum bch_dev_read_ref {
 #define BCH_DEV_WRITE_REFS()				\
 	x(journal_write)				\
 	x(journal_discard)				\
-	x(dev_do_discards)				\
+	x(discard_bucket)				\
+	x(discard_sectors_to_release)			\
 	x(discard_one_bucket_fast)			\
 	x(do_invalidates)				\
 	x(stripe_update_extents)			\
@@ -470,10 +522,9 @@ struct bch_dev {
 	unsigned		nr_btree_reserve;
 
 	struct work_struct	invalidate_work;
-	struct work_struct	discard_work;
-	struct mutex		discard_buckets_in_flight_lock;
-	DARRAY(struct discard_in_flight)	discard_buckets_in_flight;
+
 	struct work_struct	discard_fast_work;
+	darray_u64		discard_fast;
 
 	atomic64_t		rebalance_work;
 
@@ -506,6 +557,7 @@ struct bch_dev {
 	x(btree_running)		\
 	x(accounting_replay_done)	\
 	x(may_go_rw)			\
+	x(scrub_journal)		\
 	x(may_upgrade_downgrade)	\
 	x(rw)				\
 	x(rw_init_done)			\
@@ -675,7 +727,7 @@ struct bch_fs {
 	struct bch_disk_groups_cpu __rcu	*disk_groups;
 	struct bch_fs_capacity			capacity;
 	struct bch_fs_allocator			allocator;
-	struct buckets_waiting_for_journal	buckets_waiting_for_journal;
+	struct bch_fs_discards			discards;
 
 	struct bch_fs_snapshots			snapshots;
 
@@ -692,6 +744,7 @@ struct bch_fs {
 
 	struct io_clock			io_clock[2];
 	struct journal_entry_res	clock_journal_res;
+	struct journal_entry_res	rewind_limit_res;
 
 	/* IO PATH */
 	struct workqueue_struct	*btree_update_wq;
@@ -714,6 +767,10 @@ struct bch_fs {
 	struct list_head	moving_context_list;
 	struct mutex		moving_context_lock;
 
+	/* Journal scrub: extents needing repair after recovery */
+	darray_scrub_journal_repair		scrub_journal_repairs;
+	struct mutex				scrub_journal_repairs_lock;
+
 	struct bch_fs_compress	compress;
 	struct bch_fs_reconcile	reconcile;
 	struct bch_fs_copygc	copygc;
@@ -725,6 +782,7 @@ struct bch_fs {
 
 #ifndef NO_BCACHEFS_FS
 	struct bch_fs_vfs	vfs;
+	struct fdm_hash		fdm_table;
 #endif
 
 	/* QUOTAS */

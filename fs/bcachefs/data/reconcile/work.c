@@ -279,8 +279,8 @@ static int extent_ec_pending(struct btree_trans *trans, struct bkey_ptrs_c ptrs)
 	return false;
 }
 
-static int bch2_extent_reconcile_pending_mod(struct btree_trans *, struct btree_iter *,
-					     unsigned, struct bkey_s_c, bool);
+int bch2_extent_reconcile_pending_mod(struct btree_trans *, struct btree_iter *,
+				      unsigned, struct bkey_s_c, bool);
 
 static int reconcile_set_data_opts(struct btree_trans *trans,
 				   struct btree_iter *iter,
@@ -364,6 +364,7 @@ static int reconcile_set_data_opts(struct btree_trans *trans,
 			/* Don't let online durability go below data_replicas */
 
 			/* Drop entire pointers? */
+			ptr_bit = 1;
 			bkey_for_each_ptr_decode(k.k, ptrs, p, entry) {
 				int d = bch2_extent_ptr_durability(trans, &p);
 				if (d < 0)
@@ -466,8 +467,8 @@ static void bkey_reconcile_pending_mod(struct bch_fs *c, struct bkey_i *k, bool 
 	r->pending = set;
 }
 
-static int bch2_extent_reconcile_pending_mod(struct btree_trans *trans, struct btree_iter *iter,
-					     unsigned level, struct bkey_s_c k, bool set)
+int bch2_extent_reconcile_pending_mod(struct btree_trans *trans, struct btree_iter *iter,
+				      unsigned level, struct bkey_s_c k, bool set)
 {
 	struct bch_fs *c = trans->c;
 
@@ -725,7 +726,8 @@ static int do_reconcile_extent(struct moving_context *ctxt,
 	struct bch_inode_opts opts;
 	struct data_update_opts data_opts = {};
 	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts,
-				  work, &iter, 0, k, stripe_retry));
+				  work, &iter, 0,
+				  bkey_i_to_s_c(stack_k.k), stripe_retry));
 
 	event_add_trace(c, reconcile_data, stack_k.k->k.size, buf, ({
 		prt_newline(&buf);
@@ -781,9 +783,10 @@ static int do_reconcile_extent_phys(struct moving_context *ctxt,
 		.read_flags	= BCH_READ_soft_require_read_device,
 	};
 	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts,
-				  &data_opts, work, &iter, bp.v->level, k, stripe_retry));
+				  &data_opts, work, &iter, bp.v->level,
+				  bkey_i_to_s_c(stack_k.k), stripe_retry));
 
-	event_add_trace(c, reconcile_phys, k.k->size, buf, ({
+	event_add_trace(c, reconcile_phys, stack_k.k->k.size, buf, ({
 		prt_newline(&buf);
 		bch2_bkey_val_to_text(&buf, c, bkey_i_to_s_c(stack_bp.k));
 		prt_newline(&buf);
@@ -815,7 +818,8 @@ static int do_reconcile_btree(struct moving_context *ctxt,
 
 	struct bch_inode_opts opts;
 	struct data_update_opts data_opts = {};
-	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter, bp.v->level, k, NULL));
+	try(__do_reconcile_extent(ctxt, snapshot_io_opts, &opts, &data_opts, work, &iter,
+				  bp.v->level, bkey_i_to_s_c(stack_k.k), NULL));
 
 	event_add_trace(c, reconcile_btree, btree_sectors(c), buf, ({
 		prt_newline(&buf);
@@ -1144,12 +1148,24 @@ typedef struct {
 
 DEFINE_DARRAY(reconcile_phys_thr);
 
+/*
+ * Destructor ordering: closure_return() must be the last thing before the
+ * function returns, but __cleanup destructors run after closure_return()
+ * signals the parent — which can then free the thrs darray containing the
+ * reconcile_phys_thr (and its embedded bch_move_stats) that
+ * moving_context.stats still points to. So we manage moving_context
+ * lifetime manually here.
+ *
+ * This is a general hazard with __cleanup + closure_return: the parent
+ * can wake and free resources before the child's destructors run. In Rust
+ * this will be enforced by Drop ordering.
+ */
 static CLOSURE_CALLBACK(do_reconcile_phys_thread)
 {
 	closure_type(thr, reconcile_phys_thr, cl);
 	struct bch_fs *c = thr->c;
 
-	struct moving_context ctxt __cleanup(bch2_moving_ctxt_exit);
+	struct moving_context ctxt;
 	bch2_moving_ctxt_init(&ctxt, c, NULL, &thr->stats,
 			      writepoint_ptr(&c->allocator.reconcile_write_point),
 			      true);
@@ -1160,6 +1176,7 @@ static CLOSURE_CALLBACK(do_reconcile_phys_thread)
 	darray_make_room(&work, RECONCILE_WORK_BUF_NR);
 	if (!work.size) {
 		bch_err(c, "%s: unable to allocate memory", __func__);
+		bch2_moving_ctxt_exit(&ctxt);
 		closure_return(cl);
 		return;
 	}
@@ -1196,6 +1213,7 @@ static CLOSURE_CALLBACK(do_reconcile_phys_thread)
 			break;
 	}
 
+	bch2_moving_ctxt_exit(&ctxt);
 	closure_return(cl);
 }
 

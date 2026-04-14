@@ -28,6 +28,93 @@
 
 #include "util/vstructs.h"
 
+/* DOC_LATEX(superblock)
+ * \subsubsection{Layout and redundancy}
+ *
+ * The primary superblock is located at sector 8 (4\,KB from the start of the
+ * device). A \texttt{bch\_sb\_layout} structure at sector 7 records the locations
+ * of all superblock copies---typically three: the primary, one immediately
+ * following it, and one at the end of the device. Up to 61 backup locations can
+ * be recorded. The layout structure has its own magic number so that it can be
+ * found independently.
+ *
+ * The superblock is written with a monotonically increasing sequence number
+ * (\texttt{seq}); on read, the copy with the highest valid sequence number is
+ * authoritative. The \texttt{bcachefs recover-super} command can reconstruct a
+ * device's superblock from backup copies or from another device in the same
+ * filesystem.
+ *
+ * \subsubsection{Fixed fields}
+ *
+ * The superblock header contains:
+ *
+ * \begin{itemize}
+ * \item \textbf{Identity}: filesystem UUID (immutable), user-visible UUID
+ *   (mutable), filesystem label (up to 32 bytes)
+ * \item \textbf{Geometry}: block size, btree node size, number of devices
+ * \item \textbf{Versioning}: current metadata version, minimum version of any
+ *   data still on disk (see the Metadata versions section)
+ * \item \textbf{State}: initialized and clean flags, sequence number, write
+ *   timestamp
+ * \item \textbf{Options}: all persistent filesystem options are encoded as
+ *   bitfields in the superblock flags---replication counts, checksum and
+ *   compression types, error handling policy, targets, quotas, journal
+ *   parameters, and more. Mount options override these at runtime;
+ *   \texttt{bcachefs set-fs-option} persists changes.
+ * \end{itemize}
+ *
+ * \subsubsection{Variable-length fields}
+ *
+ * The superblock is extensible via type-tagged variable-length fields
+ * (\texttt{BCH\_SB\_FIELD\_*}). Some are per-device (journal bucket lists);
+ * most are shared across all devices (members, encryption, replicas, disk
+ * groups, error log, recovery state). See the On disk format section for the
+ * complete field list.
+ *
+ * Key fields for operators:
+ *
+ * \begin{description}
+ * \item[\texttt{members\_v2}] Per-\hyperref[sec:devices]{device} metadata: UUID,
+ *   bucket count and size, state (rw/ro/evacuating/spare), durability,
+ *   data-type restrictions, error counters, performance measurements, and
+ *   hardware identifiers.
+ * \item[\texttt{disk\_groups}] Device label hierarchy and group definitions,
+ *   used for target-based allocation (see
+ *   \hyperref[sec:disk-groups]{Device labels and targets}).
+ * \item[\texttt{replicas}] All unique replication configurations in the
+ *   filesystem (see Replicas tracking).
+ * \item[\texttt{clean}] Written on clean shutdown: contains btree roots and
+ *   usage counters, allowing the next mount to skip
+ *   \hyperref[sec:journal]{journal} replay entirely.
+ * \item[\texttt{errors}] Persistent error log recording operational errors and
+ *   fsck findings across mounts.
+ * \item[\texttt{ext}] Extended metadata including required recovery passes and
+ *   silenced errors.
+ * \end{description}
+ *
+ * \subsubsection{Version upgrades}
+ *
+ * The superblock records both the current metadata version and the minimum
+ * version of any data still on disk. This two-version scheme allows the
+ * filesystem to upgrade incrementally: new data is written with the current
+ * version while old data retains the format it was written with. The
+ * \texttt{version\_upgrade} option controls upgrade behavior at mount time:
+ * \texttt{compatible} (allow new features), \texttt{incompatible} (upgrade to
+ * latest), or \texttt{none} (don't upgrade). Downgrade information is stored
+ * separately so that a filesystem can be safely used by older tools after an
+ * upgrade if no incompatible features have been used.
+ *
+ * \subsubsection{Consistency and self-healing}
+ *
+ * Every superblock copy is checksummed; reads validate the checksum and fall
+ * back to alternative copies on failure. The sequence number provides
+ * unambiguous ordering when copies disagree. The \texttt{recover-super} command
+ * can reconstruct a completely overwritten superblock from the backup copies on
+ * the same device or from any other device in the filesystem. Recovery passes
+ * \texttt{check\_alloc\_info} and \texttt{check\_topology} verify that
+ * superblock-recorded state matches the actual on-disk data.
+ */
+
 #include <linux/backing-dev.h>
 #include <linux/sort.h>
 #include <linux/string_choices.h>
@@ -38,7 +125,7 @@ struct bch2_metadata_version {
 };
 
 static const struct bch2_metadata_version bch2_metadata_versions[] = {
-#define x(n, v) {		\
+#define x(n, v, ...) {		\
 	.version = v,				\
 	.name = #n,				\
 },
@@ -108,7 +195,7 @@ int bch2_set_version_incompat(struct bch_fs *c, enum bcachefs_metadata_version v
 }
 
 const char * const bch2_sb_fields[] = {
-#define x(name, nr)	#name,
+#define x(name, nr, ...)	#name,
 	BCH_SB_FIELDS()
 #undef x
 	NULL
@@ -390,8 +477,6 @@ static int bch2_sb_compatible(struct bch_sb *sb, struct printbuf *out)
 int bch2_sb_validate(struct bch_sb *sb, struct bch_opts *opts, u64 read_offset,
 		     enum bch_validate_flags flags, struct printbuf *out)
 {
-	enum bch_opt_id opt_id;
-
 	try(bch2_sb_compatible(sb, out));
 
 	if (!opts->no_version_check) {
@@ -475,52 +560,10 @@ int bch2_sb_validate(struct bch_sb *sb, struct bch_opts *opts, u64 read_offset,
 	if (sb->nr_devices > 1)
 		SET_BCH_SB_MULTI_DEVICE(sb, true);
 
-	if (!flags) {
-		/*
-		 * Been seeing a bug where these are getting inexplicably
-		 * zeroed, so we're now validating them, but we have to be
-		 * careful not to preven people's filesystems from mounting:
-		 */
-		if (!BCH_SB_JOURNAL_FLUSH_DELAY(sb))
-			SET_BCH_SB_JOURNAL_FLUSH_DELAY(sb, 1000);
-		if (!BCH_SB_JOURNAL_RECLAIM_DELAY(sb))
-			SET_BCH_SB_JOURNAL_RECLAIM_DELAY(sb, 1000);
-
-		if (!BCH_SB_VERSION_UPGRADE_COMPLETE(sb))
-			SET_BCH_SB_VERSION_UPGRADE_COMPLETE(sb, le16_to_cpu(sb->version));
-
-		if (le16_to_cpu(sb->version) <= bcachefs_metadata_version_disk_accounting_v2 &&
-		    !BCH_SB_ALLOCATOR_STUCK_TIMEOUT(sb))
-			SET_BCH_SB_ALLOCATOR_STUCK_TIMEOUT(sb, 30);
-
-		if (le16_to_cpu(sb->version) <= bcachefs_metadata_version_disk_accounting_v2)
-			SET_BCH_SB_PROMOTE_WHOLE_EXTENTS(sb, true);
-
-		if (!BCH_SB_WRITE_ERROR_TIMEOUT(sb))
-			SET_BCH_SB_WRITE_ERROR_TIMEOUT(sb, 30);
-
-		if (le16_to_cpu(sb->version) <= bcachefs_metadata_version_extent_flags &&
-		    !BCH_SB_CSUM_ERR_RETRY_NR(sb))
-			SET_BCH_SB_CSUM_ERR_RETRY_NR(sb, 3);
-	}
-
 #ifdef __KERNEL__
 	if (!BCH_SB_SHARD_INUMS_NBITS(sb))
 		SET_BCH_SB_SHARD_INUMS_NBITS(sb, ilog2(roundup_pow_of_two(num_online_cpus())));
 #endif
-
-	for (opt_id = 0; opt_id < bch2_opts_nr; opt_id++) {
-		const struct bch_option *opt = bch2_opt_table + opt_id;
-
-		if (opt->get_sb) {
-			u64 v = bch2_opt_from_sb(sb, opt_id, -1);
-
-			prt_printf(out, "Invalid option ");
-			try(bch2_opt_validate(opt, v, out));
-
-			printbuf_reset(out);
-		}
-	}
 
 	/* validate layout */
 	try(validate_sb_layout(&sb->layout, out));
@@ -1344,7 +1387,7 @@ static const struct bch_sb_field_ops bch_sb_field_ops_ext = {
 };
 
 static const struct bch_sb_field_ops *bch2_sb_field_ops[] = {
-#define x(f, nr)					\
+#define x(f, nr, ...)					\
 	[BCH_SB_FIELD_##f] = &bch_sb_field_ops_##f,
 	BCH_SB_FIELDS()
 #undef x
@@ -1528,7 +1571,7 @@ void bch2_sb_to_text(struct printbuf *out,
 		for (id = 0; id < bch2_opts_nr; id++) {
 			const struct bch_option *opt = bch2_opt_table + id;
 
-			if (opt->get_sb) {
+			if (opt->get_sb || opt->get_ext) {
 				u64 v = bch2_opt_from_sb(sb, id, -1);
 
 				prt_printf(out, "%s:\t", opt->attr.name);

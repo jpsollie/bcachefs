@@ -291,6 +291,10 @@ void bch2_member_to_text(struct printbuf *out,
 
 	prt_printf(out, "Last device name:\t%.*s\n", (int) sizeof(m->device_name), m->device_name);
 	prt_printf(out, "Last device model:\t%.*s\n", (int) sizeof(m->device_model), m->device_model);
+	prt_printf(out, "Last device serial:\t%.*s\n", (int) sizeof(m->device_serial), m->device_serial);
+
+	if (m->flush_errors)
+		prt_printf(out, "Flush errors:\t%llu\n", le64_to_cpu(m->flush_errors));
 }
 
 static void bch2_member_to_text_short_sb(struct printbuf *out,
@@ -311,6 +315,7 @@ static void bch2_member_to_text_short_sb(struct printbuf *out,
 
 	prt_printf(out, "Device:\t%.*s\n", (int) sizeof(m->device_name), m->device_name);
 	prt_printf(out, "Model:\t%.*s\n", (int) sizeof(m->device_model), m->device_model);
+	prt_printf(out, "Serial:\t%.*s\n", (int) sizeof(m->device_serial), m->device_serial);
 
 	prt_printf(out, "State:\t%s\n",
 		   BCH_MEMBER_STATE(m) < BCH_MEMBER_STATE_NR
@@ -525,6 +530,10 @@ void bch2_dev_io_errors_to_text(struct printbuf *out, struct bch_dev *ca)
 		for (unsigned i = 0; i < BCH_MEMBER_ERROR_NR; i++)
 			prt_printf(out, "%s:\t%llu\n", bch2_member_error_strs[i],
 				   atomic64_read(&ca->errors[i]) - le64_to_cpu(m.errors_at_reset[i]));
+
+	if (le64_to_cpu(m.flush_errors))
+		prt_printf(out, "Flush errors (device not honoring FUA/flush):\t%llu\n",
+			   le64_to_cpu(m.flush_errors));
 }
 
 void bch2_dev_errors_reset(struct bch_dev *ca)

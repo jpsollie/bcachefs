@@ -1,4 +1,32 @@
 // SPDX-License-Identifier: GPL-2.0
+
+/* DOC(btree-iterators)
+ *
+ * A btree iterator (`struct btree_iter`) maintains a full path from the root
+ * of a btree down to a specific key in a leaf node. At each level, the
+ * iterator holds a pointer to the btree node, a node-level iterator (which
+ * merges across the multiple sorted bsets within that node), and a lock
+ * sequence number for efficient relock-after-restart.
+ *
+ * The fundamental invariant is that `iter.pos` must always be consistent with
+ * the node iterators: at every level, the node iterator points to the first
+ * key >= `iter.pos`, and the previous key compares strictly less. This is the
+ * correct position for inserting a new key at `iter.pos`.
+ *
+ * Iterators support several modes: `peek()` returns the next key and advances
+ * `iter.pos` to match; `peek_slot()` returns the key at exactly `iter.pos`
+ * (synthesizing a deleted key for empty slots); `peek_prev()` iterates
+ * backwards. Extent iterators have special semantics: extents are indexed by
+ * their end position, so the first extent covering a range starting at
+ * `iter.pos` is found by searching for the first key strictly greater than
+ * `iter.pos`. When iterating over extents by slots, holes between extents are
+ * synthesized, guaranteeing that the returned keys exactly cover the keyspace
+ * with monotonically increasing positions.
+ *
+ * Multiple iterators within a transaction coexist without invalidating each
+ * other. On transaction restart, each iterator's saved position allows it to
+ * resume from where it left off.
+ */
 #include "bcachefs.h"
 
 #include "alloc/replicas.h"
@@ -637,7 +665,8 @@ void bch2_btree_path_level_init(struct btree_trans *trans,
 	EBUG_ON(!btree_path_pos_in_node(path, b));
 
 	path->l[b->c.level].lock_seq = six_lock_seq(&b->c.lock);
-	path->l[b->c.level].b = b;
+	/* deadlock detector reads unlocked */
+	WRITE_ONCE(path->l[b->c.level].b, b);
 	__btree_path_level_init(trans, path, b->c.level);
 }
 
@@ -1294,15 +1323,26 @@ out:
 static inline void btree_path_copy(struct btree_trans *trans, struct btree_path *dst,
 			    struct btree_path *src)
 {
-	unsigned i, offset = offsetof(struct btree_path, pos);
+	unsigned start_offset	= offsetof(struct btree_path, pos);
+	unsigned end_offset	= offsetof(struct btree_path, l[0]);
 
-	memcpy((void *) dst + offset,
-	       (void *) src + offset,
-	       sizeof(struct btree_path) - offset);
+	memcpy((void *) dst + start_offset,
+	       (void *) src + start_offset,
+	       end_offset - start_offset);
 
-	for (i = 0; i < BTREE_MAX_DEPTH; i++) {
+	/* do not use memcpy for path->l; we cannot have torn writes to path->l[0].b,
+	 * and we're guaranteed them since the memcpy starts misaligned */
+
+	for (unsigned i = 0; i < BTREE_MAX_DEPTH; i++) {
+		WRITE_ONCE(dst->l[i].b,   src->l[i].b);
+		dst->l[i].iter		= src->l[i].iter;
+		dst->l[i].lock_seq	= src->l[i].lock_seq;
+
+#ifdef CONFIG_BCACHEFS_LOCK_TIME_STATS
+		dst->l[i].lock_taken_time = src->l[i].lock_taken_time;
+#endif
+
 		unsigned t = btree_node_locked_type(dst, i);
-
 		if (t != BTREE_NODE_UNLOCKED)
 			six_lock_increment(&dst->l[i].b->c.lock, t);
 	}
@@ -3616,6 +3656,7 @@ struct btree_trans *__bch2_trans_get(struct bch_fs *c, unsigned fn_idx)
 	 * modifying the journal keys gap buffer
 	 */
 	EBUG_ON(!test_bit(BCH_FS_may_go_rw, &c->flags) &&
+		!test_bit(BCH_FS_scrub_journal, &c->flags) &&
 		current != c->recovery_task);
 
 	struct btree_trans *trans = bch2_trans_alloc(c);

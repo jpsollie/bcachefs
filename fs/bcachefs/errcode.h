@@ -132,8 +132,6 @@
 	x(ENOMEM,			ENOMEM_btree_node_reclaim)		\
 	x(ENOMEM,			ENOMEM_btree_node_mem_alloc)		\
 	x(ENOMEM,			ENOMEM_btree_cache_cannibalize_lock)	\
-	x(ENOMEM,			ENOMEM_buckets_waiting_for_journal_init)\
-	x(ENOMEM,			ENOMEM_buckets_waiting_for_journal_set)	\
 	x(ENOMEM,			ENOMEM_set_nr_journal_buckets)		\
 	x(ENOMEM,			ENOMEM_dev_journal_init)		\
 	x(ENOMEM,			ENOMEM_journal_pin_fifo)		\
@@ -202,6 +200,7 @@
 	x(EAGAIN,			open_buckets_empty)			\
 	x(EAGAIN,			freelist_empty)				\
 	x(EAGAIN,			stripe_needs_block_evacuate)		\
+	x(EAGAIN,			stripe_insufficient_devices)		\
 	x(ENOSPC,			ec_alloc_failed)			\
 	x(BCH_ERR_freelist_empty,	no_buckets_found)			\
 	x(0,				transaction_restart)			\
@@ -227,6 +226,7 @@
 	x(BCH_ERR_transaction_restart,	transaction_restart_write_buffer_flush)	\
 	x(BCH_ERR_transaction_restart,	transaction_restart_nested)		\
 	x(BCH_ERR_transaction_restart,	transaction_restart_commit)		\
+	x(BCH_ERR_transaction_restart,	transaction_restart_journal_overwrites_changed)	\
 	x(0,				no_btree_node)				\
 	x(BCH_ERR_no_btree_node,	no_btree_node_relock)			\
 	x(BCH_ERR_no_btree_node,	no_btree_node_upgrade)			\
@@ -244,6 +244,7 @@
 	x(BCH_ERR_btree_insert_fail,	btree_insert_need_journal_reclaim)	\
 	x(0,				backpointer_to_overwritten_btree_node)	\
 	x(0,				journal_reclaim_would_deadlock)		\
+	x(0,				journal_rewind_no_overwrites)		\
 	x(EROFS,			fsck)					\
 	x(BCH_ERR_fsck,			fsck_ask)				\
 	x(BCH_ERR_fsck,			fsck_fix)				\
@@ -301,7 +302,104 @@
 	x(EINVAL,			erasure_coding_stripe_update_err)	\
 	x(EINVAL,			option_negative)			\
 	x(EINVAL,			topology_repair)			\
-	x(EINVAL,			unaligned_io)				\
+	x(EINVAL,			EINVAL_unaligned_io)			\
+	x(EINVAL,			EINVAL_rename_bad_flags)		\
+	x(EINVAL,			EINVAL_setattr_bad_file_type)		\
+	x(EINVAL,			EINVAL_get_name_not_dir)		\
+	x(EINVAL,			EINVAL_reconfigure_read_write)		\
+	x(EINVAL,			EINVAL_fcollapse_finsert_unaligned)	\
+	x(EINVAL,			EINVAL_finsert_past_eof)		\
+	x(EINVAL,			EINVAL_fcollapse_past_eof)		\
+	x(EINVAL,			EINVAL_remap_bad_flags)			\
+	x(EINVAL,			EINVAL_remap_unaligned)			\
+	x(EINVAL,			EINVAL_remap_overlapping)		\
+	x(EINVAL,			EINVAL_setlabel_too_long)		\
+	x(EINVAL,			EINVAL_goingdown_bad_flags)		\
+	x(EINVAL,			EINVAL_subvol_create_bad_flags)		\
+	x(EINVAL,			EINVAL_subvol_create_flags_mismatch)	\
+	x(EINVAL,			EINVAL_subvol_destroy_bad_flags)	\
+	x(EINVAL,			EINVAL_subvol_readdir_pad)		\
+	x(EINVAL,			EINVAL_subvol_to_path_no_buf)		\
+	x(EINVAL,			EINVAL_snapshot_tree_query_pad)		\
+	x(EINVAL,			EINVAL_fiemap_overflow)			\
+	x(EINVAL,			EINVAL_snapshot_not_subvol_root)	\
+	x(EINVAL,			EINVAL_quota_enable_acct)		\
+	x(EINVAL,			EINVAL_quota_enable_usrquota)		\
+	x(EINVAL,			EINVAL_quota_enable_grpquota)		\
+	x(EINVAL,			EINVAL_quota_enable_prjquota)		\
+	x(EINVAL,			EINVAL_quota_remove_usrquota)		\
+	x(EINVAL,			EINVAL_quota_remove_grpquota)		\
+	x(EINVAL,			EINVAL_quota_remove_prjquota)		\
+	x(EINVAL,			EINVAL_quota_set_info_bad_type)		\
+	x(EINVAL,			EINVAL_quota_set_info_bad_field)	\
+	x(EINVAL,			EINVAL_xattr_get_bad_opt)		\
+	x(EINVAL,			EINVAL_xattr_get_not_inode_opt)		\
+	x(EINVAL,			EINVAL_xattr_set_bad_opt)		\
+	x(EINVAL,			EINVAL_xattr_set_not_inode_opt)		\
+	x(EINVAL,			EINVAL_fsck_offline_bad_flags)		\
+	x(EINVAL,			EINVAL_fsck_online_bad_passes)		\
+	x(EINVAL,			EINVAL_fsck_online_bad_flags)		\
+	x(EINVAL,			EINVAL_journal_replay_key_bad_btree_depth)\
+	x(EINVAL,			EINVAL_dev_resize_shrink)		\
+	x(EINVAL,			EINVAL_missing_new_extent_overwrite)	\
+	x(EINVAL,			EINVAL_version_min_too_old)		\
+	x(EINVAL,			EINVAL_block_size_needs_thp)		\
+	x(EINVAL,			EINVAL_utf8_load_failed)		\
+	x(EINVAL,			EINVAL_casefolding_no_unicode)		\
+	x(EINVAL,			EINVAL_no_version_check_start)		\
+	x(EINVAL,			EINVAL_ioctl_disk_add_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_add_v2_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_remove_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_remove_v2_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_online_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_online_v2_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_offline_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_offline_v2_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_set_state_bad_args)	\
+	x(EINVAL,			EINVAL_ioctl_disk_set_state_v2_bad_args)\
+	x(EINVAL,			EINVAL_ioctl_data_read_short_buf)	\
+	x(EINVAL,			EINVAL_ioctl_data_bad_op)		\
+	x(EINVAL,			EINVAL_ioctl_fs_usage_not_started)	\
+	x(EINVAL,			EINVAL_ioctl_query_accounting_not_started)	\
+	x(EINVAL,			EINVAL_ioctl_dev_usage_not_started)		\
+	x(EINVAL,			EINVAL_ioctl_dev_usage_bad_flags)		\
+	x(EINVAL,			EINVAL_ioctl_dev_usage_v2_not_started)		\
+	x(EINVAL,			EINVAL_ioctl_dev_usage_v2_bad_flags)		\
+	x(EINVAL,			EINVAL_ioctl_read_super_bad_flags)		\
+	x(EINVAL,			EINVAL_ioctl_disk_get_idx_bad_dev)		\
+	x(EINVAL,			EINVAL_ioctl_disk_resize_bad_flags)		\
+	x(EINVAL,			EINVAL_ioctl_disk_resize_v2_bad_flags)		\
+	x(EINVAL,			EINVAL_ioctl_disk_resize_journal_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_resize_journal_too_big)	\
+	x(EINVAL,			EINVAL_ioctl_disk_resize_journal_v2_bad_flags)	\
+	x(EINVAL,			EINVAL_ioctl_disk_resize_journal_v2_too_big)	\
+	x(EINVAL,			EINVAL_ioctl_not_started)			\
+	x(EINVAL,			EINVAL_journal_write_overran_available_space)	\
+	x(EINVAL,			EINVAL_journal_bucket_not_found)		\
+	x(EINVAL,			EINVAL_journal_seq_overflow)			\
+	x(EINVAL,			EINVAL_journal_entry_version_incompatible)	\
+	x(EINVAL,			EINVAL_journal_validate_version_incompatible)	\
+	x(EINVAL,			EINVAL_journal_rewind_before_discard)		\
+	x(EINVAL,			EINVAL_opt_target_parse_not_found)		\
+	x(EINVAL,			EINVAL_disable_encryption_no_crypt)		\
+	x(EINVAL,			EINVAL_reflink_gc_table_mismatch)		\
+	x(EINVAL,			EINVAL_ec_stripe_create_existing_key)		\
+	x(EINVAL,			EINVAL_finsert_offset_past_eof)			\
+	x(EINVAL,			EINVAL_data_job_bad_op)				\
+	x(EINVAL,			EINVAL_snapshot_parent_already_has_children)	\
+	x(EINVAL,			EINVAL_snapshot_delete_has_two_children)	\
+	x(EINVAL,			EINVAL_snapshot_delete_interior_at_runtime)	\
+	x(EINVAL,			EINVAL_snapshot_parent_missing_child_ptr)	\
+	x(EINVAL,			EINVAL_snapshot_child_bad_parent)		\
+	x(EINVAL,			EINVAL_snapshot_bad_subvol_flag)		\
+	x(EINVAL,			EINVAL_opt_parse_uint_required)		\
+	x(EINVAL,			EINVAL_opt_parse_str_required)		\
+	x(EINVAL,			EINVAL_test_zero_nr_or_threads)		\
+	x(EINVAL,			EINVAL_test_unknown_test)		\
+	x(EINVAL,			EINVAL_sysfs_opt_not_found)		\
+	x(EINVAL,			EINVAL_ioctl_query_counters_bad_flags)	\
+	x(EINVAL,			EINVAL_node_scan_no_nodes)		\
+	x(EINVAL,			EINVAL_node_scan_too_many_replicas)	\
 	x(BCH_ERR_topology_repair,	topology_repair_drop_this_node)		\
 	x(BCH_ERR_topology_repair,	topology_repair_drop_prev_node)		\
 	x(BCH_ERR_topology_repair,	topology_repair_did_fill_from_scan)	\
@@ -324,6 +422,7 @@
 	x(EROFS,			erofs_nochanges)			\
 	x(EROFS,			erofs_no_alloc_info)			\
 	x(EROFS,			erofs_filesystem_full)			\
+	x(EROFS,			erofs_sb_not_migrated)			\
 	x(EROFS,			insufficient_devices)			\
 	x(EROFS,			erofs_recovery_cancelled)		\
 	x(EROFS,			emergency_ro)				\
@@ -334,6 +433,8 @@
 	x(BCH_ERR_operation_blocked,	bucket_alloc_blocked)			\
 	x(BCH_ERR_operation_blocked,	open_bucket_alloc_blocked)		\
 	x(BCH_ERR_operation_blocked,	stripe_alloc_blocked)			\
+	x(BCH_ERR_operation_blocked,	stripe_buf_mem_blocked)			\
+	x(EAGAIN,			stripe_buf_mem_limit)			\
 	x(BCH_ERR_journal_res_blocked,	journal_blocked)			\
 	x(BCH_ERR_journal_res_blocked,	journal_max_in_flight)			\
 	x(BCH_ERR_journal_res_blocked,	journal_max_open)			\
@@ -399,7 +500,9 @@
 	x(BCH_ERR_stripe_read,		stripe_read_ptr_stale)			\
 	x(BCH_ERR_stripe_read,		stripe_read_csum_err)			\
 	x(BCH_ERR_stripe_read,		stripe_reconstruct)			\
+	x(BCH_ERR_stripe_read,		stripe_reconstruct_enomem)		\
 	x(BCH_ERR_stripe_read,		stripe_reconstruct_insufficient_blocks)	\
+	x(BCH_ERR_stripe_read,		stripe_reconstruct_stale_race)		\
 	x(EIO,				key_type_error)				\
 	x(EIO,				extent_poisoned)			\
 	x(EIO,				missing_indirect_extent)		\
@@ -439,7 +542,7 @@
 	x(BCH_ERR_data_read_retry_avoid,data_read_decrypt_err)			\
 	x(BCH_ERR_data_read,		data_read_ptr_stale_race)		\
 	x(BCH_ERR_data_read_retry,	data_read_ptr_stale_retry)		\
-	x(BCH_ERR_data_read_retry,	data_read_ptr_stale_dirty)		\
+	x(BCH_ERR_data_read_retry_avoid,data_read_ptr_stale_dirty)		\
 	x(BCH_ERR_data_read,		data_read_no_encryption_key)		\
 	x(BCH_ERR_data_read,		data_read_buffer_too_small)		\
 	x(BCH_ERR_data_read,		data_read_key_overwritten)		\

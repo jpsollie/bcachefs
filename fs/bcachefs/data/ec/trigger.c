@@ -94,10 +94,11 @@ void bch2_stripe_to_text(struct printbuf *out, struct bch_fs *c,
 	else
 		prt_printf(out, "(invalid shift %u)", s.csum_granularity_bits);
 
-	if (s.disk_label) {
-		prt_str(out, " label");
+	prt_str(out, " label=");
+	if (s.disk_label)
 		bch2_disk_path_to_text(out, c, s.disk_label - 1);
-	}
+	else
+		prt_str(out, "(none)");
 
 	if (s.needs_reconcile)
 		prt_str(out, " needs_reconcile");
@@ -116,7 +117,6 @@ void bch2_stripe_to_text(struct printbuf *out, struct bch_fs *c,
 		bch2_extent_ptr_to_text(out, c, ptr);
 
 		if (s.csum_type < BCH_CSUM_NR &&
-		    i < nr_data &&
 		    stripe_blockcount_offset(&s, i) < bkey_val_bytes(k.k))
 			prt_printf(out,  "#%u", stripe_blockcount_get(sp, i));
 	}
@@ -145,10 +145,11 @@ static int __mark_stripe_bucket(struct btree_trans *trans,
 
 	if (!deleting) {
 		if (bch2_trans_inconsistent_on(parity && bch2_bucket_sectors_total(*a), trans,
-				"bucket %llu:%llu gen %u data type %s dirty_sectors %u cached_sectors %u: data already in parity bucket\n%s",
+				"bucket %llu:%llu gen %u data type %s dirty_sectors %u stripe_sectors %u cached_sectors %u: data already in parity bucket\n%s",
 				bucket.inode, bucket.offset, a->gen,
 				bch2_data_type_str(a->data_type),
 				a->dirty_sectors,
+				a->stripe_sectors,
 				a->cached_sectors,
 				(bch2_bkey_val_to_text(&buf, c, s.s_c), buf.buf)))
 			return bch_err_throw(c, mark_stripe);
@@ -545,7 +546,8 @@ void bch2_stripe_new_buckets_del(struct bch_fs *c, struct ec_stripe_new *s)
 	guard(spinlock)(&c->ec.stripes_new_lock);
 
 	for (unsigned i = 0; i < s->new_stripe.key.v.nr_blocks; i++)
-		hlist_del_init(&s->buckets[i].hash);
+		if (!hlist_unhashed(&s->buckets[i].hash))
+			hlist_del_init(&s->buckets[i].hash);
 }
 
 static struct ec_stripe_handle *bch2_open_stripe_find(struct bch_fs *c, u64 idx)

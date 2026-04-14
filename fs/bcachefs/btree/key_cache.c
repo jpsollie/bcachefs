@@ -1,5 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 
+/* DOC(btree-key-cache)
+ *
+ * Fast single-key lookups for btrees where the same keys are read and updated
+ * frequently. The primary user is the alloc btree: extent updates need to
+ * update allocation information for the affected buckets, and doing a full
+ * btree lookup for each would be expensive. The key cache keeps recently
+ * accessed alloc keys in a hash table, allowing updates to be applied directly
+ * without a btree traversal. Cached entries are flushed to the btree by
+ * journal reclaim.
+ */
+
 #include "bcachefs.h"
 
 #include "btree/cache.h"
@@ -652,6 +663,7 @@ static unsigned long bch2_btree_key_cache_scan(struct shrinker *shrink,
 	unsigned iter, start;
 	int srcu_idx;
 
+	u64 start_time = local_clock();
 	srcu_idx = srcu_read_lock(&c->btree.trans.barrier);
 	rcu_read_lock();
 
@@ -716,6 +728,7 @@ out:
 
 	rcu_read_unlock();
 	srcu_read_unlock(&c->btree.trans.barrier, srcu_idx);
+	bch2_time_stats_update(&c->times[BCH_TIME_btree_key_cache_scan], start_time);
 
 	return freed;
 }
